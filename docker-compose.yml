@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: binance-trading-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount logs for persistence
+      - ./logs:/app/logs
+      # Mount data for database persistence
+      - ./data:/app/data
+      # Mount source code for development (optional, comment out for production)
+      - ./src:/app/src
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - trading-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  trading-network:
+    driver: bridge

@@ -1,0 +1,26 @@
+# Binance API
+python-binance==1.0.19
+
+# Data analysis and manipulation
+pandas==2.1.4
+numpy==1.26.2
+
+# Technical analysis
+ta==0.11.0
+pandas-ta==0.3.14b0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Logging
+colorlog==6.8.0
+
+# Database (optional)
+sqlalchemy==2.0.23
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Async support
+aiohttp==3.9.1
