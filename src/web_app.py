@@ -72,17 +72,30 @@ class BotManager:
             
             bot_instance = self.bot
             
-            # Start bot in separate thread
+            # Start bot in separate thread with persistent event loop
             def run_bot():
                 global bot_running
                 bot_running = True
                 import asyncio
-                asyncio.run(self.bot.start())
-                bot_running = False
+                
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    # Run bot and keep loop alive
+                    loop.run_until_complete(self.bot.start())
+                except Exception as e:
+                    logger.error(f"Bot crashed: {e}", exc_info=True)
+                finally:
+                    bot_running = False
+                    loop.close()
+                    logger.info("Bot event loop closed")
             
             self.thread = Thread(target=run_bot, daemon=True)
             self.thread.start()
             self.status = 'running'
+            logger.info("Bot thread started")
             
             # Emit status update
             socketio.emit('bot_status', {'status': 'running'})
@@ -566,36 +579,65 @@ def api_models():
 
 @app.route('/api/logs')
 def api_logs():
-    """Get recent log entries from all log files"""
+    """Get recent log entries from specific log file"""
     logs_dir = Path('logs')
-    lines = request.args.get('lines', 100, type=int)
     
-    if not logs_dir.exists():
-        return jsonify({'success': True, 'logs': []})
+    # Query params
+    requested_file = request.args.get('file', 'multi_pair_bot.log')
+    tail = request.args.get('tail', 500, type=int)
+    tail = min(tail, 5000)  # Cap at 5000 lines
+    
+    # Whitelist allowed files
+    allowed_files = [
+        'multi_pair_bot.log',
+        'trading_bot.log',
+        'ml_training.log',
+        'advanced_ml_training.log'
+    ]
+    
+    if requested_file not in allowed_files:
+        return jsonify({
+            'success': False,
+            'message': f'File not allowed. Choose from: {", ".join(allowed_files)}'
+        })
+    
+    log_file = logs_dir / requested_file
+    
+    if not log_file.exists():
+        # Try to find any log file as fallback
+        for fallback in ['multi_pair_bot.log', 'trading_bot.log']:
+            fallback_path = logs_dir / fallback
+            if fallback_path.exists():
+                log_file = fallback_path
+                requested_file = fallback
+                break
+        else:
+            return jsonify({
+                'success': True,
+                'file': requested_file,
+                'lines': [],
+                'message': f'Log file {requested_file} not found yet (bot may not have started)'
+            })
     
     try:
-        all_logs = []
+        # Efficiently tail the file
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+            recent_lines = all_lines[-tail:] if len(all_lines) > tail else all_lines
         
-        # Get all log files
-        log_files = sorted(logs_dir.glob('*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+        file_size = log_file.stat().st_size
         
-        if not log_files:
-            return jsonify({'success': True, 'logs': ['No log files found']})
-        
-        # Read most recent log file first
-        for log_file in log_files[:3]:  # Show up to 3 most recent log files
-            try:
-                with open(log_file, 'r') as f:
-                    file_lines = f.readlines()
-                    if file_lines:
-                        all_logs.append(f"\n=== {log_file.name} (last {len(file_lines[-lines:])} lines) ===\n")
-                        all_logs.extend(file_lines[-lines:])
-            except Exception as e:
-                logger.error(f"Error reading {log_file}: {e}")
-        
-        return jsonify({'success': True, 'logs': all_logs if all_logs else ['No logs available']})
+        return jsonify({
+            'success': True,
+            'file': requested_file,
+            'lines': recent_lines,
+            'size_bytes': file_size,
+            'total_lines': len(all_lines),
+            'returned_lines': len(recent_lines)
+        })
     
     except Exception as e:
+        logger.error(f"Error reading {log_file}: {e}", exc_info=True)
         return jsonify({'success': False, 'message': str(e)})
 
 
