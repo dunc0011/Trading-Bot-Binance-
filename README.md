@@ -201,15 +201,71 @@ tail -f logs/trading_bot.log
 - Check port conflicts
 - Review container logs: `docker-compose logs`
 
+## ML EMA Strategy
+
+The bot now includes a machine learning strategy that predicts profitable EMA crossovers!
+
+### Quick Start
+
+1. **Train a model:**
+   ```bash
+   # Inside Docker
+   docker-compose exec trading-bot python -m src.utils.train_ml_model \
+     --symbol ETHUSDT --interval 1h --lookback-days 90
+   
+   # Or locally
+   python -m src.utils.train_ml_model --symbol ETHUSDT --interval 1h --lookback-days 90
+   ```
+
+2. **Enable ML strategy:**
+   ```bash
+   # In .env file
+   STRATEGY=ml_ema
+   ```
+
+3. **Run the bot:**
+   ```bash
+   docker-compose up
+   ```
+
+### Features
+
+- ✅ **Walk-forward validation** - Proper time-series cross-validation
+- ✅ **No data leakage** - All features properly lagged
+- ✅ **Multiple models** - Automatically selects best of RF, GBM, LogReg
+- ✅ **Feature engineering** - EMA, RSI, ATR, volume, returns
+- ✅ **Model persistence** - Saved with metadata and metrics
+- ✅ **Docker-ready** - Headless plotting for containerized training
+
+### Model Artifacts
+
+Trained models are saved to `models/ml_ema/` with:
+- `{symbol}_{interval}_ml_ema.joblib` - The trained model
+- `{symbol}_{interval}_ml_ema.meta.json` - Training metrics and metadata
+
+### Configuration
+
+Add to `.env`:
+```bash
+STRATEGY=ml_ema
+ML_MODEL_DIR=models/ml_ema
+ML_PROBA_THRESHOLD=0.55
+ML_TARGET_RETURN_THRESHOLD=0.001
+ML_WFV_SPLITS=5
+```
+
+See WARP.md for detailed documentation.
+
 ## Roadmap
 
-- [ ] Multiple strategy support
-- [ ] Backtesting framework
+- [x] Multiple strategy support
+- [x] Machine learning strategies
+- [x] Walk-forward validation
+- [ ] Backtesting framework with equity curves
 - [ ] Web dashboard for monitoring
 - [ ] Telegram notifications
 - [ ] Advanced technical indicators
 - [ ] Portfolio management
-- [ ] Machine learning strategies
 
 ## License
 

@@ -14,6 +14,8 @@ services:
       - ./logs:/app/logs
       # Mount data for database persistence
       - ./data:/app/data
+      # Mount models for ML persistence
+      - ./models:/app/models
       # Mount source code for development (optional, comment out for production)
       - ./src:/app/src
       - ./config:/app/config

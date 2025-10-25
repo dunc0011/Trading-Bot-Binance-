@@ -7,6 +7,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
 from strategies.simple_strategy import SimpleStrategy
+from strategies.ml_ema_strategy import MLEMAStrategy
 from utils.risk_manager import RiskManager
 from utils.order_manager import OrderManager
 
@@ -31,8 +32,14 @@ class TradingBot:
                 config.api_secret
             )
         
-        # Initialize components
-        self.strategy = SimpleStrategy(config)
+        # Initialize components based on strategy selection
+        if config.strategy == 'ml_ema':
+            self.logger.info("Initializing ML EMA Strategy")
+            self.strategy = MLEMAStrategy(config)
+        else:
+            self.logger.info("Initializing Simple SMA Strategy")
+            self.strategy = SimpleStrategy(config)
+        
         self.risk_manager = RiskManager(config)
         self.order_manager = OrderManager(self.client, config)
         
