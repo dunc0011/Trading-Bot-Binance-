@@ -732,59 +732,51 @@ class MultiPairBot:
                 profit_pct = ((current_price - entry_price) / entry_price) * 100
                 remaining_size = position.get('remaining_size', position['size'])
                 
-                # SCALED PARTIAL EXITS - Lock profits incrementally
+                # AGGRESSIVE SCALPING - Quick profit taking for 5m timeframe
                 partial_exits = position.get('partial_exits', [])
                 
-                # Exit 30% at +1.0% profit
-                if profit_pct >= 1.0 and '1.0' not in partial_exits:
-                    exit_amount = position['size'] * 0.3
+                # Exit 60% at +0.15% profit (first target)
+                if profit_pct >= 0.15 and '0.15' not in partial_exits:
+                    exit_amount = position['size'] * 0.6
                     if exit_amount > 0:
-                        logger.info(f"💰 {symbol}: Taking 30% profit at +{profit_pct:.2f}% (${exit_amount:.0f})")
+                        logger.info(f"💰 {symbol}: Taking 60% profit at +{profit_pct:.2f}% (${exit_amount:.0f})")
                         # TODO: Execute partial sell order here
                         position['remaining_size'] = remaining_size - exit_amount
-                        position['partial_exits'].append('1.0')
+                        position['partial_exits'].append('0.15')
                 
-                # Exit 30% more at +1.5% profit
-                if profit_pct >= 1.5 and '1.5' not in partial_exits:
-                    exit_amount = position['size'] * 0.3
-                    if exit_amount > 0 and remaining_size >= exit_amount:
-                        logger.info(f"💰 {symbol}: Taking 30% more profit at +{profit_pct:.2f}% (${exit_amount:.0f})")
-                        position['remaining_size'] = remaining_size - exit_amount
-                        position['partial_exits'].append('1.5')
-                
-                # Exit 40% more at +2.5% profit (letting last portion run)
-                if profit_pct >= 2.5 and '2.5' not in partial_exits:
+                # Exit remaining 40% at +0.3% profit (second target)
+                if profit_pct >= 0.3 and '0.3' not in partial_exits:
                     exit_amount = remaining_size  # Close remaining position
                     if exit_amount > 0:
-                        logger.info(f"💎 {symbol}: Taking final profit at +{profit_pct:.2f}% (${exit_amount:.0f})")
+                        logger.info(f"💎 {symbol}: Taking final 40% profit at +{profit_pct:.2f}% (${exit_amount:.0f})")
                         # Full exit at this level
                         position['remaining_size'] = 0
-                        position['partial_exits'].append('2.5')
+                        position['partial_exits'].append('0.3')
                         # Will trigger full close below
                 
-                # SMART TRAILING STOP: Activate immediately, tighter as profit grows
+                # AGGRESSIVE TRAILING STOP: Very tight for 5m scalping
                 if not position['trailing_stop_activated']:
-                    # Always activate trailing stop, even at break-even
+                    # Activate trailing stop immediately
                     position['trailing_stop_activated'] = True
-                    position['initial_stop'] = entry_price * 0.99  # Start at -1% stop
-                    logger.debug(f"🔒 {symbol}: Trailing stop system active")
+                    position['initial_stop'] = entry_price * 0.998  # Start at -0.2% stop
+                    logger.debug(f"🔒 {symbol}: Aggressive trailing stop active")
                 
-                # Dynamic trailing distance based on profit level
-                if profit_pct < 0.3:
-                    # Small/no profit: Allow -1% stop loss
-                    stop_price = entry_price * 0.99
-                elif profit_pct < 1.0:
-                    # Small profit (0.3-1%): Move stop to break-even
+                # Ultra-tight trailing for scalping
+                if profit_pct < 0.08:
+                    # Very tight stop loss for scalping
+                    stop_price = entry_price * 0.998  # -0.2% stop loss
+                elif profit_pct < 0.15:
+                    # Move to break-even quickly at 0.08%
                     stop_price = entry_price
-                    if profit_pct >= 0.3 and not position.get('break_even_locked'):
+                    if profit_pct >= 0.08 and not position.get('break_even_locked'):
                         position['break_even_locked'] = True
                         logger.info(f"🔒 {symbol}: Break-even locked at +{profit_pct:.2f}%")
-                elif profit_pct < 2.0:
-                    # Good profit (1-2%): Lock in 50% of gains
-                    stop_price = entry_price + (current_price - entry_price) * 0.5
+                elif profit_pct < 0.3:
+                    # Lock in 70% of gains between 0.15% and 0.3%
+                    stop_price = entry_price + (current_price - entry_price) * 0.7
                 else:
-                    # Great profit (2%+): Lock in 70% of gains
-                    stop_price = entry_price + (position['highest_price'] - entry_price) * 0.7
+                    # Lock in 80% of gains above 0.3%
+                    stop_price = entry_price + (position['highest_price'] - entry_price) * 0.8
                 
                 # Check if stop triggered
                 if current_price <= stop_price:
