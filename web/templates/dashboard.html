@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <div class="logo-icon">🤖</div>
+                <div>
+                    <div class="logo-text">TradingBot</div>
+                    <div class="logo-subtitle">Multi-Pair ML Scanner</div>
+                </div>
+            </div>
+            
+            <nav class="nav">
+                <a href="#" class="nav-item active" data-tab="overview">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                    </svg>
+                    <span>Overview</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="scanner">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                    </svg>
+                    <span>Market Scanner</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="positions">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3h2a2 2 0 0 1 2 2v2M8 3H6a2 2 0 0 0-2 2v2"/>
+                    </svg>
+                    <span>Positions</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="training">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2v20M2 12h20"/>
+                    </svg>
+                    <span>ML Training</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="logs">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    <span>Logs</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="settings">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m5.2-14.2l-4.3 4.3m0 5.8l4.3 4.3M23 12h-6m-6 0H1m14.2 5.2l-4.3-4.3m0-5.8l-4.3-4.3"/>
+                    </svg>
+                    <span>Settings</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-status">
+                <div class="status-item">
+                    <span class="status-label">Bot Status</span>
+                    <span id="bot-status" class="status-badge stopped">STOPPED</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">API</span>
+                    <span id="api-status" class="status-badge connecting">CONNECTING</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Header -->
+            <header class="page-header">
+                <div>
+                    <h1 class="page-title">Portfolio Overview</h1>
+                    <p class="page-subtitle">Monitor and control your trading bot</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-start" class="btn btn-success" onclick="startBot()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <polygon points="5 3 19 12 5 21 5 3"/>
+                        </svg>
+                        Start Bot
+                    </button>
+                    <button id="btn-stop" class="btn btn-danger" onclick="stopBot()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="6" y="6" width="12" height="12"/>
+                        </svg>
+                        Stop Bot
+                    </button>
+                    <button class="btn btn-secondary" onclick="refreshStatus()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+            </header>
+
+            <!-- Overview Tab -->
+            <div id="page-overview" class="tab-content active">
+            <!-- Stats Grid -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Total Balance</div>
+                    <div class="stat-value" id="total-balance">$141.70</div>
+                    <div class="stat-change positive">+0.00% (24h)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Active Positions</div>
+                    <div class="stat-value" id="active-positions">0</div>
+                    <div class="stat-change">0 / 5 max</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total P&L</div>
+                    <div class="stat-value" id="total-pnl">$0.00</div>
+                    <div class="stat-change positive">+0.00%</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Win Rate</div>
+                    <div class="stat-value" id="win-rate">0%</div>
+                    <div class="stat-change">0 trades</div>
+                </div>
+            </div>
+
+            <!-- Performance Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">📈 Performance Chart (24h)</h2>
+                    <button class="btn btn-secondary" onclick="loadPerformanceChart()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div style="padding: 20px;">
+                    <canvas id="performance-chart" width="400" height="150"></canvas>
+                </div>
+                <div class="stats-grid" style="margin-top: 16px;">
+                    <div class="stat-card">
+                        <div class="stat-label">Total Trades</div>
+                        <div class="stat-value" id="chart-total-trades">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value" id="chart-win-rate">0%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg P&L</div>
+                        <div class="stat-value" id="chart-avg-pnl">0%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total P&L</div>
+                        <div class="stat-value" id="chart-total-pnl">$0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Configuration -->
+            <div class="card">
+                <h2 class="card-title">Current Configuration</h2>
+                <div class="config-grid">
+                    <div class="config-item">
+                        <span class="config-label">Symbol</span>
+                        <span id="config-symbol" class="config-value">-</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Timeframe</span>
+                        <span id="config-timeframe" class="config-value">-</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Strategy</span>
+                        <span id="config-strategy" class="config-value">-</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Dry Run</span>
+                        <span id="config-dryrun" class="config-value">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="card">
+                <h2 class="card-title">Quick Actions</h2>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                    <button class="btn btn-primary" onclick="switchTab('training'); document.querySelector('[data-tab=training]').click();">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2v20M2 12h20"/>
+                        </svg>
+                        Train New Model
+                    </button>
+                    <button class="btn btn-primary" onclick="switchTab('scanner'); document.querySelector('[data-tab=scanner]').click();">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                        </svg>
+                        Scan Market
+                    </button>
+                    <button class="btn btn-secondary" onclick="loadModels()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        Refresh Data
+                    </button>
+                </div>
+            </div>
+
+            </div>
+            <!-- End Overview Tab -->
+
+            <!-- Scanner Tab -->
+            <div id="page-scanner" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">🔍 Market Scanner</h2>
+                        <button class="btn btn-primary" onclick="scanMarket()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                            </svg>
+                            Scan All USDT Pairs
+                        </button>
+                    </div>
+                    <div id="scanner-results">
+                        <p class="text-muted" style="text-align: center; padding: 40px;">Click "Scan All USDT Pairs" to analyze the market with ML models</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Positions Tab -->
+            <div id="page-positions" class="tab-content">
+                <!-- Live Stats -->
+                <div class="stats-grid" style="margin-bottom: 24px;">
+                    <div class="stat-card">
+                        <div class="stat-label">Bot Status</div>
+                        <div class="stat-value" id="live-bot-status">⏸️ Stopped</div>
+                        <div class="stat-change" id="live-uptime">Not running</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Active Positions</div>
+                        <div class="stat-value" id="live-positions-count">0</div>
+                        <div class="stat-change" id="live-exposure">$0 exposure</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total P&L</div>
+                        <div class="stat-value" id="live-total-pnl">$0.00</div>
+                        <div class="stat-change" id="live-pnl-pct">0.00%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Last Signal</div>
+                        <div class="stat-value" id="live-last-signal">-</div>
+                        <div class="stat-change" id="live-signal-time">-</div>
+                    </div>
+                </div>
+
+                <!-- Active Positions -->
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">🔓 Active Positions</h2>
+                        <button class="btn btn-secondary" onclick="loadPositions()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="positions-table">
+                        <p class="text-muted" style="text-align: center; padding: 40px;">No active positions</p>
+                    </div>
+                </div>
+
+                <!-- Recent Trades -->
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">📜 Recent Trades</h2>
+                        <button class="btn btn-secondary" onclick="loadRecentTrades()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="recent-trades">
+                        <p class="text-muted" style="text-align: center; padding: 40px;">No recent trades</p>
+                    </div>
+                </div>
+
+                <!-- Live Activity Feed -->
+                <div class="card">
+                    <h2 class="card-title">📡 Live Activity Feed</h2>
+                    <div id="activity-feed" style="max-height: 400px; overflow-y: auto;">
+                        <p class="text-muted" style="text-align: center; padding: 40px;">Waiting for bot activity...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Training Tab -->
+            <div id="page-training" class="tab-content">
+                <!-- Batch Training -->
+                <div class="card">
+                    <h2 class="card-title">🚀 Batch Training - Multiple Pairs</h2>
+                    <p style="margin-bottom: 20px; color: var(--text-secondary);">Train models for multiple crypto pairs at once. Recommended for multi-pair trading.</p>
+                    
+                    <!-- Train ALL Pairs Button -->
+                    <div style="background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2)); padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 2px solid rgba(99, 102, 241, 0.3);">
+                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                            <span style="font-size: 24px;">🌍</span>
+                            <div>
+                                <h3 style="margin: 0; font-size: 18px; font-weight: 600;">Train EVERY Pair</h3>
+                                <p style="margin: 4px 0 0 0; color: var(--text-secondary); font-size: 14px;">Auto-discover and train all USDT pairs with >$1M volume (~80-150+ pairs)</p>
+                            </div>
+                        </div>
+                        <button class="btn btn-success" style="width: 100%; font-size: 16px; padding: 14px; background: linear-gradient(135deg, #10b981, #059669);" onclick="trainAllPairs()">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M2 12h20"/>
+                            </svg>
+                            🚀 Train ALL Pairs (Est. 1-3 hours for initial training)
+                        </button>
+                        <p style="margin: 12px 0 0 0; font-size: 12px; color: var(--text-secondary); text-align: center;">Continuous retraining will happen automatically every 24h after initial training completes</p>
+                    </div>
+                    
+                    <div style="background: rgba(99, 102, 241, 0.1); padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <h3 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600;">Or select specific pairs:</h3>
+                        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                            <input type="checkbox" id="batch-btc" checked> <label for="batch-btc" style="cursor: pointer;">BTCUSDT</label>
+                            <input type="checkbox" id="batch-eth" checked> <label for="batch-eth" style="cursor: pointer;">ETHUSDT</label>
+                            <input type="checkbox" id="batch-bnb" checked> <label for="batch-bnb" style="cursor: pointer;">BNBUSDT</label>
+                            <input type="checkbox" id="batch-sol" checked> <label for="batch-sol" style="cursor: pointer;">SOLUSDT</label>
+                            <input type="checkbox" id="batch-xrp" checked> <label for="batch-xrp" style="cursor: pointer;">XRPUSDT</label>
+                        </div>
+                        <div style="display: flex; gap: 12px; align-items: end;">
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label>Interval</label>
+                                <select id="batch-interval">
+                                    <option value="15m" selected>15 Minutes</option>
+                                    <option value="1h">1 Hour</option>
+                                    <option value="4h">4 Hours</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label>Lookback Days</label>
+                                <input type="number" id="batch-lookback" value="180" min="30" max="365">
+                            </div>
+                            <div class="form-group" style="margin: 0;">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="batch-optimize" checked>
+                                    Optimize (slower, better models)
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <button class="btn btn-primary" style="width: 100%; font-size: 16px; padding: 12px;" onclick="batchTrainModels()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2v20M2 12h20"/>
+                        </svg>
+                        Train Selected Pairs (Est. 2-4 hours)
+                    </button>
+                    
+                    <div id="batch-training-progress" style="display: none; margin-top: 20px;">
+                        <h3 style="margin-bottom: 16px;">Training Progress</h3>
+                        <div id="batch-progress-list"></div>
+                    </div>
+                </div>
+
+                <!-- Single Training -->
+                <div class="card">
+                    <h2 class="card-title">Single Pair Training</h2>
+                    <p style="margin-bottom: 20px; color: var(--text-secondary);">Train an advanced ML model for a specific trading pair.</p>
+                    <div class="training-form">
+                        <div class="form-group">
+                            <label>Symbol</label>
+                            <input type="text" id="train-symbol" value="BTCUSDT" placeholder="BTCUSDT, ETHUSDT, etc.">
+                            <small style="color: var(--text-secondary); margin-top: 4px; display: block;">Enter any USDT trading pair</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Interval</label>
+                            <select id="train-interval">
+                                <option value="5m">5 Minutes</option>
+                                <option value="15m" selected>15 Minutes</option>
+                                <option value="1h">1 Hour</option>
+                                <option value="4h">4 Hours</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Lookback Days</label>
+                            <input type="number" id="train-lookback" value="180" min="30" max="365">
+                            <small style="color: var(--text-secondary); margin-top: 4px; display: block;">More data = better model (but slower)</small>
+                        </div>
+                        <div class="form-group">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="train-optimize" checked>
+                                Enable Optuna Optimization (recommended)
+                            </label>
+                            <small style="color: var(--text-secondary); margin-top: 4px; display: block;">20-30 min with optimization, 2-5 min without</small>
+                        </div>
+                        <button class="btn btn-primary" onclick="trainModel()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M2 12h20"/>
+                            </svg>
+                            Train Model
+                        </button>
+                    </div>
+                    <div id="training-status" class="training-status" style="display: none;">
+                        <div class="spinner"></div>
+                        <p>Training in progress... This may take 20-30 minutes.</p>
+                        <small style="color: var(--text-secondary);">You can close this page - training continues in background</small>
+                    </div>
+                </div>
+
+                <!-- Trained Models -->
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Trained Models</h2>
+                        <button class="btn btn-secondary" onclick="loadModels()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="models-list" class="models-list">
+                        <p class="text-muted">Loading models...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="page-settings" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">⚙️ Bot Configuration</h2>
+                        <button class="btn btn-primary" onclick="saveSettings()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+                            </svg>
+                            Save & Restart Bot
+                        </button>
+                    </div>
+                    <div style="padding: 24px;">
+                        <!-- Trading Settings -->
+                        <div style="margin-bottom: 32px;">
+                            <h3 style="font-size: 18px; margin-bottom: 16px; color: var(--text-primary);">Trading Settings</h3>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                                <div class="form-group">
+                                    <label>Trading Mode</label>
+                                    <select id="setting-trading-mode" class="form-control">
+                                        <option value="testnet">Testnet (Safe - Fake Money)</option>
+                                        <option value="live">Live (Real Money)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Timeframe</label>
+                                    <select id="setting-timeframe" class="form-control">
+                                        <option value="1m">1 Minute (Very Fast)</option>
+                                        <option value="5m">5 Minutes (Fast)</option>
+                                        <option value="15m">15 Minutes (Medium)</option>
+                                        <option value="1h">1 Hour (Slow)</option>
+                                        <option value="4h">4 Hours (Very Slow)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Dry Run</label>
+                                    <select id="setting-dry-run" class="form-control">
+                                        <option value="true">Enabled (Simulate Only)</option>
+                                        <option value="false">Disabled (Real Trades)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Risk Management -->
+                        <div style="margin-bottom: 32px;">
+                            <h3 style="font-size: 18px; margin-bottom: 16px; color: var(--text-primary);">Risk Management</h3>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                                <div class="form-group">
+                                    <label>Max Position Size (USDT)</label>
+                                    <input type="number" id="setting-max-position" class="form-control" min="10" max="1000" step="10">
+                                    <small style="color: var(--text-secondary); display: block; margin-top: 4px;">Maximum $ per trade</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>Stop Loss %</label>
+                                    <input type="number" id="setting-stop-loss" class="form-control" min="0.5" max="10" step="0.5">
+                                </div>
+                                <div class="form-group">
+                                    <label>Take Profit %</label>
+                                    <input type="number" id="setting-take-profit" class="form-control" min="0.5" max="20" step="0.5">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Model Training -->
+                        <div style="margin-bottom: 32px;">
+                            <h3 style="font-size: 18px; margin-bottom: 16px; color: var(--text-primary);">Model Training</h3>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                                <div class="form-group">
+                                    <label>Symbols to Trade</label>
+                                    <input type="text" id="setting-symbols" class="form-control" placeholder="ALL or BTCUSDT,ETHUSDT,BNBUSDT">
+                                    <small style="color: var(--text-secondary); display: block; margin-top: 4px;">ALL = auto-discover, or list specific pairs</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>Retrain Interval (hours)</label>
+                                    <input type="number" id="setting-retrain-interval" class="form-control" min="1" max="168" step="1">
+                                    <small style="color: var(--text-secondary); display: block; margin-top: 4px;">How often to retrain models</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>Min Volume Filter (USDT)</label>
+                                    <input type="number" id="setting-min-volume" class="form-control" min="100000" max="50000000" step="100000">
+                                    <small style="color: var(--text-secondary); display: block; margin-top: 4px;">Minimum 24h volume for pairs</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Telegram Alerts (Optional) -->
+                        <div>
+                            <h3 style="font-size: 18px; margin-bottom: 16px; color: var(--text-primary);">Telegram Notifications (Optional)</h3>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                                <div class="form-group">
+                                    <label>Telegram Bot Token</label>
+                                    <input type="text" id="setting-telegram-token" class="form-control" placeholder="123456:ABC-DEF...">
+                                </div>
+                                <div class="form-group">
+                                    <label>Telegram Chat ID</label>
+                                    <input type="text" id="setting-telegram-chat" class="form-control" placeholder="123456789">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="margin-top: 24px; padding: 16px; background: var(--warning-bg, #fff3cd); border: 1px solid var(--warning, #ffc107); border-radius: 8px;">
+                            <strong style="color: var(--warning-text, #856404);">⚠️ Important:</strong>
+                            <p style="margin: 8px 0 0 0; color: var(--warning-text, #856404); font-size: 14px;">Changing settings will stop and restart the bot. Open positions will remain open.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs Tab -->
+            <div id="page-logs" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Recent Logs</h2>
+                        <div style="display: flex; gap: 12px;">
+                            <button class="btn btn-secondary" onclick="loadLogs()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                                Refresh
+                            </button>
+                            <button class="btn btn-secondary" onclick="clearLogs()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                                Clear
+                            </button>
+                        </div>
+                    </div>
+                    <div class="logs-container">
+                        <pre id="logs-content">Loading logs...</pre>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

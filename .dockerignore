@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (will be mounted as volumes)
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+
+# Documentation (not needed in container)
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml

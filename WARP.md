@@ -236,12 +236,42 @@ DATABASE_URL=sqlite:///data/trading_bot.db
 ### Overview
 The ML EMA strategy uses machine learning (Random Forest, Gradient Boosting, or Logistic Regression) to predict profitable EMA crossover trades. It employs walk-forward validation to prevent overfitting on time-series data.
 
-### Training a Model
+### Intelligent Auto-Trainer (NEW!)
+
+**Automatically discovers and trains models for top trading pairs:**
+
+```bash
+# Run auto-trainer (discovers top 20 USDT pairs and trains models)
+./run_auto_trainer.sh
+
+# Or manually:
+docker-compose exec trading-bot python -m src.utils.auto_trainer
+```
+
+**What it does:**
+- Fetches top 20 USDT pairs by 24h volume from Binance
+- Trains ML models for all discovered pairs automatically
+- Retrains models weekly to keep them fresh
+- Runs continuously, checking every 24 hours
+- Saves training history to `models/training_history.json`
+
+**Configuration** (`src/utils/auto_trainer.py`):
+```python
+self.min_volume_usdt = 10_000_000    # Min 24h volume (10M USDT)
+self.max_pairs = 20                  # Train top N pairs
+self.retrain_interval_days = 7       # Retrain weekly
+self.lookback_days = 90              # Training data history
+self.timeframe = '1h'                # Candle interval
+```
+
+**See `AUTO_TRAINER_GUIDE.md` for full documentation.**
+
+### Manual Training (Single Pair)
 
 **Inside Docker (recommended):**
 ```bash
 docker-compose exec trading-bot python -m src.utils.train_ml_model \
-  --symbol ETHUSDT \
+  --symbol BTCUSDT \
   --interval 1h \
   --lookback-days 90
 ```
@@ -249,7 +279,7 @@ docker-compose exec trading-bot python -m src.utils.train_ml_model \
 **Locally:**
 ```bash
 python -m src.utils.train_ml_model \
-  --symbol ETHUSDT \
+  --symbol BTCUSDT \
   --interval 1h \
   --lookback-days 90 \
   --log-level INFO

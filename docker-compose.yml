@@ -1,14 +1,16 @@
 version: '3.8'
 
 services:
-  trading-bot:
+  web-ui:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: binance-trading-bot
+    container_name: trading-bot-web-ui
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "5000:5000"
     volumes:
       # Mount logs for persistence
       - ./logs:/app/logs
@@ -16,11 +18,14 @@ services:
       - ./data:/app/data
       # Mount models for ML persistence
       - ./models:/app/models
-      # Mount source code for development (optional, comment out for production)
+      # Mount source code for development
       - ./src:/app/src
       - ./config:/app/config
+      - ./web:/app/web
     environment:
       - PYTHONUNBUFFERED=1
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-dev-secret-key-change-in-production}
+    command: python src/web_app.py
     networks:
       - trading-network
     logging:

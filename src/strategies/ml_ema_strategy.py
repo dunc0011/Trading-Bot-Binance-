@@ -76,9 +76,14 @@ class MLEMAStrategy:
         latest_features = X.iloc[[-1]]
         current_price = df['close'].iloc[-1]
         
-        # Get ML prediction
+        # Get ML prediction with confidence
         try:
             signal = self.ml_manager.predict_signal(latest_features)
+            
+            # Get confidence score (probability)
+            ml_confidence = 0.55  # Default
+            if hasattr(self.ml_manager._model, 'predict_proba'):
+                ml_confidence = float(self.ml_manager._model.predict_proba(latest_features)[0, 1])
         except Exception as e:
             self.logger.error(f"ML prediction failed: {e}", exc_info=True)
             return None
@@ -91,16 +96,17 @@ class MLEMAStrategy:
             result = {
                 'action': 'BUY',
                 'price': current_price,
-                'reason': 'ML model predicts profitable long entry',
+                'reason': f'ML model predicts profitable long entry ({ml_confidence*100:.1f}% confidence)',
                 'indicators': {
                     'ema5': float(latest_features['ema5'].iloc[0]),
                     'ema8': float(latest_features['ema8'].iloc[0]),
                     'rsi': float(latest_features['rsi'].iloc[0]),
-                    'ml_signal': signal
+                    'ml_signal': signal,
+                    'ml_confidence': ml_confidence
                 }
             }
             self.position = 'long'
-            self.logger.info(f"ML BUY signal generated at {current_price}")
+            self.logger.info(f"ML BUY signal generated at {current_price} ({ml_confidence*100:.0f}% conf)")
         
         # SELL signal (exit long position)
         elif signal == 0 and self.position == 'long':

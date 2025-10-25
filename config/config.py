@@ -20,8 +20,15 @@ class Config:
         self.symbol = os.getenv('SYMBOL', 'BTCUSDT')
         self.timeframe = os.getenv('TIMEFRAME', '1h')
         
-        # Risk management
-        self.max_position_size = float(os.getenv('MAX_POSITION_SIZE', '100'))
+        # Risk management - percentage-based position sizing
+        self.position_size_percentage = float(os.getenv('POSITION_SIZE_PERCENTAGE', '15'))
+        if not (0 < self.position_size_percentage <= 100):
+            raise ValueError("POSITION_SIZE_PERCENTAGE must be between 0 and 100")
+        
+        # Optional USDT ceiling (safety cap)
+        max_pos_str = os.getenv('MAX_POSITION_SIZE', '')
+        self.max_position_size = float(max_pos_str) if max_pos_str and max_pos_str.strip() else None
+        
         self.stop_loss_percentage = float(os.getenv('STOP_LOSS_PERCENTAGE', '2.0'))
         self.take_profit_percentage = float(os.getenv('TAKE_PROFIT_PERCENTAGE', '5.0'))
         

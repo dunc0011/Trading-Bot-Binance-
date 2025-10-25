@@ -43,6 +43,7 @@ class MLModelManager:
         
         # Model state
         self._model = None
+        self._model_mtime = None  # Track model file modification time for hot-reload
         self._threshold = float(getattr(config, "ml_proba_threshold", 0.55))
     
     def _rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
@@ -154,25 +155,47 @@ class MLModelManager:
             for key in metrics_list[0].keys()
         }
     
-    def ensure_loaded(self):
-        """Load model from disk or trigger training if needed (synchronous version)"""
-        if self._model is not None:
+    def ensure_loaded(self, force_reload: bool = False):
+        """Load model from disk with hot-reload support
+        
+        Args:
+            force_reload: Force reload even if model is already loaded
+        """
+        if not self.model_path.exists():
             return
         
-        if self.model_path.exists():
-            try:
+        try:
+            # Get current model file modification time
+            current_mtime = os.path.getmtime(self.model_path)
+            
+            # Check if we need to reload
+            should_reload = (
+                force_reload or 
+                self._model is None or 
+                self._model_mtime is None or 
+                current_mtime > self._model_mtime
+            )
+            
+            if should_reload:
                 self._model = joblib.load(self.model_path)
-                self.logger.info(f"Loaded ML model from {self.model_path}")
+                self._model_mtime = current_mtime
                 
                 # Load metadata if available
+                meta = {}
                 if self.meta_path.exists():
                     with open(self.meta_path, 'r') as f:
                         meta = json.load(f)
-                        self.logger.info(f"Model trained at {meta.get('trained_at')}, "
-                                       f"f1={meta.get('f1', 0):.3f}")
-            except Exception as e:
-                self.logger.error(f"Failed to load model: {e}", exc_info=True)
-                self._model = None
+                
+                reload_msg = "🔄 Reloaded" if self._model is not None and not force_reload else "Loaded"
+                self.logger.info(
+                    f"{reload_msg} ML model from {self.model_path.name} | "
+                    f"trained: {meta.get('trained_at', 'unknown')} | "
+                    f"f1={meta.get('f1', 0):.3f}"
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to load model: {e}", exc_info=True)
+            self._model = None
+            self._model_mtime = None
     
     def train_and_persist(self, candles: pd.DataFrame) -> Dict[str, Any]:
         """
