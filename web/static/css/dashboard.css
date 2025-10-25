@@ -148,6 +148,15 @@ body {
     color: var(--success);
 }
 
+/* Bot Activity Monitor */
+.monitor-body {
+    padding: 20px;
+}
+
+.monitor-body:empty {
+    display: none;
+}
+
 /* Main Content */
 .main {
     padding: 32px;
