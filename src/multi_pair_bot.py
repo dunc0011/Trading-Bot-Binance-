@@ -1322,13 +1322,11 @@ class MultiPairBot:
         logger.info("Stopping Multi-Pair Bot...")
         self.running = False
         
-        # Close all open positions
-        if self.active_positions:
-            asyncio.create_task(self.close_all_positions())
-        
         # Stop continuous trainer
         if hasattr(self, 'continuous_trainer'):
             self.continuous_trainer.stop()
+        
+        logger.info("Bot stopped. Positions will be left open.")
 
 
 async def main():
