@@ -222,6 +222,60 @@ DATABASE_URL=sqlite:///data/trading_bot.db
 3. **Live with small position** - Test with minimal risk
 4. **Live with full position** - Deploy confidently
 
+## Bot Activity Monitor (Web Dashboard)
+
+### Overview
+The web dashboard at http://localhost:5000 includes a real-time Bot Activity Monitor on the Positions page that shows exactly what the bot is analyzing in real-time.
+
+### Features
+- **Real-time updates** via SocketIO (no page refresh needed)
+- **Cycle tracking** with unique IDs for each 60-second analysis cycle
+- **Per-pair analysis** showing:
+  - Symbol being analyzed
+  - ML confidence score (%)
+  - Signal type (BUY/SELL/HOLD/ERROR) with color-coded badges
+  - Price and reasoning
+  - Time since last update
+- **Live progress bar** showing analysis progress (X of Y pairs analyzed)
+- **Cycle duration** showing how long the last cycle took
+- **Connection status** indicator
+- **Collapsible** to save screen space
+
+### SocketIO Events
+The bot emits these events that drive the UI:
+
+**cycle_start**
+- Emitted when a new trading cycle begins
+- Includes: cycle_id, timeframe, list of pairs, total_pairs, dry_run status
+
+**pair_analysis_complete**
+- Emitted after each pair is analyzed
+- Includes: symbol, price, ML confidence, signal, reason, progress, elapsed time
+- Updates progress bar in real-time
+
+**cycle_complete**
+- Emitted when all pairs analyzed
+- Includes: duration, signal counts (BUY/SELL/HOLD), error count
+
+**live_analysis** (enhanced)
+- Emitted when ML generates a signal
+- Includes: cycle_id, symbol, confidence, price, reason, full indicators
+
+### Log Files
+Bot runtime logs are now written to files with rotation:
+- **Location**: `logs/multi_pair_bot.log` or `logs/trading_bot.log`
+- **Rotation**: 10 MB max per file, 5 backups
+- **Format**: `timestamp level logger_name message`
+- **Access**: Via `/api/logs?file=multi_pair_bot.log&tail=500` endpoint
+- **Viewing**: Logs tab in dashboard updates automatically
+
+### Usage
+1. Start bot via dashboard (http://localhost:5000) or CLI
+2. Navigate to **Positions** page
+3. Watch **Bot Activity Monitor** section update in real-time
+4. Click header to collapse/expand
+5. Check **Logs** tab to see detailed bot logs
+
 ## Important Notes
 
 - **Never commit `.env` file** - Contains API credentials
@@ -230,6 +284,8 @@ DATABASE_URL=sqlite:///data/trading_bot.db
 - **Bot runs in 60-second cycles** - Signals checked once per minute
 - **Strategy position tracking** - Strategies must track own position state to avoid duplicate signals
 - **No automated exits** - Current implementation requires manual position management or strategy-level exit logic
+- **Logs are persisted** - Both in files (logs/) and visible in dashboard
+- **Real-time monitoring** - Bot Activity Monitor shows live analysis without polling
 
 ## ML EMA Strategy
 
