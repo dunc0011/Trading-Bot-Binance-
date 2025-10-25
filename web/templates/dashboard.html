@@ -256,6 +256,58 @@
                     </div>
                 </div>
 
+                <!-- Bot Activity Monitor -->
+                <div class="card" id="bot-activity-monitor">
+                    <div class="card-header" style="cursor: pointer;" onclick="toggleMonitor()">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <h2 class="card-title" style="margin: 0;">🤖 Bot Activity Monitor</h2>
+                            <span id="monitor-conn-indicator" class="status-badge connecting">●</span>
+                        </div>
+                        <button class="btn btn-secondary" id="monitor-collapse-btn" onclick="event.stopPropagation(); toggleMonitor();" style="padding: 4px 12px;">
+                            <span id="monitor-collapse-icon">▼</span>
+                        </button>
+                    </div>
+                    <div id="monitor-body" class="monitor-body">
+                        <!-- Cycle Status -->
+                        <div style="background: rgba(99, 102, 241, 0.05); padding: 12px; border-radius: 8px; margin-bottom: 16px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                                <div>
+                                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Current Cycle</div>
+                                    <div style="font-family: monospace; font-size: 14px; font-weight: 600;" id="monitor-cycle-id">Waiting...</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Timeframe</div>
+                                    <div style="font-size: 14px; font-weight: 600;" id="monitor-timeframe">-</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Pairs Monitored</div>
+                                    <div style="font-size: 14px; font-weight: 600;" id="monitor-total-pairs">-</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Last Cycle</div>
+                                    <div style="font-size: 14px; font-weight: 600;" id="monitor-last-duration">-</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Progress Bar -->
+                        <div style="margin-bottom: 16px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <span style="font-size: 13px; font-weight: 600;">Analysis Progress</span>
+                                <span style="font-size: 13px; color: var(--text-secondary);" id="monitor-progress-text">0 / 0</span>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.05); border-radius: 8px; height: 8px; overflow: hidden;">
+                                <div id="monitor-progress-bar" style="background: linear-gradient(90deg, #6366f1, #8b5cf6); height: 100%; width: 0%; transition: width 0.3s ease;" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                            </div>
+                        </div>
+
+                        <!-- Pair Analysis Results -->
+                        <div style="max-height: 400px; overflow-y: auto;" id="monitor-pairs-container">
+                            <p class="text-muted" style="text-align: center; padding: 40px;">Waiting for analysis data...</p>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Active Positions -->
                 <div class="card">
                     <div class="card-header">
@@ -335,14 +387,15 @@
                             <div class="form-group" style="flex: 1; margin: 0;">
                                 <label>Interval</label>
                                 <select id="batch-interval">
-                                    <option value="15m" selected>15 Minutes</option>
+                                    <option value="5m" selected>5 Minutes</option>
+                                    <option value="15m">15 Minutes</option>
                                     <option value="1h">1 Hour</option>
                                     <option value="4h">4 Hours</option>
                                 </select>
                             </div>
                             <div class="form-group" style="flex: 1; margin: 0;">
                                 <label>Lookback Days</label>
-                                <input type="number" id="batch-lookback" value="180" min="30" max="365">
+                                <input type="number" id="batch-lookback" value="60" min="30" max="365">
                             </div>
                             <div class="form-group" style="margin: 0;">
                                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">

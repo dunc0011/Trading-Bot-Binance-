@@ -509,8 +509,16 @@ function switchTab(tabName) {
     // Handle positions tab auto-refresh
     if (tabName === 'positions') {
         startPositionsRefresh();
+        stopPortfolioRefresh();
     } else {
         stopPositionsRefresh();
+    }
+    
+    // Handle overview tab auto-refresh
+    if (tabName === 'overview') {
+        startPortfolioRefresh();
+    } else {
+        stopPortfolioRefresh();
     }
     
     // Load settings when switching to settings tab
@@ -673,7 +681,7 @@ function displayPositions(positions) {
                             <td style="font-family: monospace;">$${pos.current_price.toFixed(2)}</td>
                             <td>$${pos.size.toFixed(0)}</td>
                             <td class="${pnlClass}" style="font-weight: 600;">${pos.pnl > 0 ? '+' : ''}$${pos.pnl.toFixed(2)} (${pos.pnl_pct > 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%)</td>
-                            <td>${pos.ml_confidence ? (pos.ml_confidence * 100).toFixed(0) + '%' : '-'}</td>
+                            <td>${pos.ml_confidence > 0 ? (pos.ml_confidence * 100).toFixed(0) + '%' : '<span style="color: var(--text-secondary); font-size: 11px;">Loaded</span>'}</td>
                             <td>${pos.duration}</td>
                         </tr>
                     `;
@@ -686,8 +694,16 @@ function displayPositions(positions) {
 }
 
 function updateLiveStats(data) {
-    if (data.bot_status) {
-        document.getElementById('live-bot-status').textContent = data.bot_status === 'running' ? '▶️ Running' : '⏸️ Stopped';
+    // Update bot status
+    const botStatus = data.bot_status || 'stopped';
+    const statusElement = document.getElementById('live-bot-status');
+    if (statusElement) {
+        statusElement.textContent = botStatus === 'running' ? '▶️ Running' : '⏸️ Stopped';
+    }
+    
+    const uptimeElement = document.getElementById('live-uptime');
+    if (uptimeElement) {
+        uptimeElement.textContent = botStatus === 'running' ? 'Active' : 'Not running';
     }
     
     document.getElementById('live-positions-count').textContent = data.positions ? data.positions.length : 0;
@@ -823,10 +839,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadModels();
     loadLogs();
     
-    // Check if positions tab is active on load
+    // Check which tab is active on load
     const activeTab = document.querySelector('.nav-item.active');
-    if (activeTab && activeTab.getAttribute('data-tab') === 'positions') {
-        startPositionsRefresh();
+    if (activeTab) {
+        const tabName = activeTab.getAttribute('data-tab');
+        if (tabName === 'positions') {
+            startPositionsRefresh();
+        } else if (tabName === 'overview') {
+            startPortfolioRefresh();
+        }
+    } else {
+        // Default to overview if no active tab
+        startPortfolioRefresh();
     }
 });
 
@@ -920,6 +944,233 @@ document.head.appendChild(style);
 
 // Auto-refresh logs every 10 seconds
 setInterval(loadLogs, 10000);
+
+// ===== Bot Activity Monitor =====
+
+const monitorState = {
+    connected: false,
+    collapsed: false,
+    cycleId: null,
+    timeframe: null,
+    totalPairs: 0,
+    analyzedCount: 0,
+    perPair: new Map(),  // symbol -> {price, confidence, signal, reason, updatedAt}
+    lastCycle: { durationMs: 0, endedAt: null },
+    lastEventTime: Date.now()
+};
+
+let renderScheduled = false;
+
+function scheduleRender() {
+    if (!renderScheduled && !monitorState.collapsed) {
+        renderScheduled = true;
+        requestAnimationFrame(() => {
+            renderMonitor();
+            renderScheduled = false;
+        });
+    }
+}
+
+function renderMonitor() {
+    // Update cycle info
+    if (monitorState.cycleId) {
+        document.getElementById('monitor-cycle-id').textContent = monitorState.cycleId.substring(0, 8) + '...';
+    }
+    document.getElementById('monitor-timeframe').textContent = monitorState.timeframe || '-';
+    document.getElementById('monitor-total-pairs').textContent = monitorState.totalPairs || '-';
+    
+    // Update progress
+    const progress = monitorState.totalPairs > 0 ? (monitorState.analyzedCount / monitorState.totalPairs) * 100 : 0;
+    document.getElementById('monitor-progress-bar').style.width = `${progress}%`;
+    document.getElementById('monitor-progress-bar').setAttribute('aria-valuenow', progress);
+    document.getElementById('monitor-progress-text').textContent = `${monitorState.analyzedCount} / ${monitorState.totalPairs}`;
+    
+    // Update last cycle duration
+    if (monitorState.lastCycle.durationMs > 0) {
+        const seconds = (monitorState.lastCycle.durationMs / 1000).toFixed(1);
+        document.getElementById('monitor-last-duration').textContent = `${seconds}s`;
+    }
+    
+    // Render pairs list
+    const container = document.getElementById('monitor-pairs-container');
+    if (monitorState.perPair.size === 0) {
+        container.innerHTML = '<p class="text-muted" style="text-align: center; padding: 40px;">Waiting for analysis data...</p>';
+        return;
+    }
+    
+    let html = '<div style="display: grid; gap: 8px;">';
+    const sortedPairs = Array.from(monitorState.perPair.entries()).sort((a, b) => 
+        (b[1].updatedAt || 0) - (a[1].updatedAt || 0)
+    );
+    
+    for (const [symbol, data] of sortedPairs) {
+        const signalClass = data.signal === 'BUY' ? 'success' : data.signal === 'SELL' ? 'danger' : data.signal === 'ERROR' ? 'warning' : 'secondary';
+        const confidence = (data.confidence * 100).toFixed(0);
+        const timeAgo = data.updatedAt ? Math.floor((Date.now() - data.updatedAt) / 1000) : 0;
+        
+        html += `
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-weight: 600; font-size: 14px;">${symbol}</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="status-badge ${signalClass}" style="font-size: 11px; padding: 2px 8px;">${data.signal}</span>
+                        ${data.confidence > 0 ? `<span style="font-size: 12px; color: var(--text-secondary);">${confidence}%</span>` : ''}
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                    <span style="color: var(--text-secondary);">${data.reason || 'Analyzing...'}</span>
+                    <span style="font-family: monospace; color: var(--text-secondary);">${data.price > 0 ? '$' + data.price.toFixed(2) : '-'}</span>
+                </div>
+                ${timeAgo > 0 ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">${timeAgo}s ago</div>` : ''}
+            </div>
+        `;
+    }
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function toggleMonitor() {
+    monitorState.collapsed = !monitorState.collapsed;
+    const body = document.getElementById('monitor-body');
+    const icon = document.getElementById('monitor-collapse-icon');
+    
+    if (monitorState.collapsed) {
+        body.style.display = 'none';
+        icon.textContent = '▶';
+    } else {
+        body.style.display = 'block';
+        icon.textContent = '▼';
+        scheduleRender();
+    }
+}
+
+// SocketIO handlers for monitor
+socket.on('cycle_start', (data) => {
+    console.log('Cycle started:', data);
+    monitorState.cycleId = data.cycle_id;
+    monitorState.timeframe = data.timeframe;
+    monitorState.totalPairs = data.total_pairs;
+    monitorState.analyzedCount = 0;
+    monitorState.perPair.clear();
+    monitorState.lastEventTime = Date.now();
+    scheduleRender();
+});
+
+socket.on('pair_analysis_complete', (data) => {
+    console.log('Pair analyzed:', data.symbol, data.signal);
+    monitorState.perPair.set(data.symbol, {
+        price: data.price || 0,
+        confidence: data.confidence || 0,
+        signal: data.signal,
+        reason: data.reason,
+        updatedAt: Date.now()
+    });
+    monitorState.analyzedCount = data.analyzed_index || (monitorState.analyzedCount + 1);
+    monitorState.lastEventTime = Date.now();
+    scheduleRender();
+});
+
+socket.on('cycle_complete', (data) => {
+    console.log('Cycle complete:', data);
+    monitorState.lastCycle = {
+        durationMs: data.duration_ms,
+        endedAt: Date.now()
+    };
+    monitorState.lastEventTime = Date.now();
+    scheduleRender();
+});
+
+// Update monitor connection indicator
+function updateMonitorConnection(connected) {
+    monitorState.connected = connected;
+    const indicator = document.getElementById('monitor-conn-indicator');
+    if (indicator) {
+        indicator.className = connected ? 'status-badge connected' : 'status-badge stopped';
+        indicator.textContent = '●';
+    }
+}
+
+socket.on('connect', () => {
+    updateMonitorConnection(true);
+});
+
+socket.on('disconnect', () => {
+    updateMonitorConnection(false);
+});
+
+// Check for stale data
+setInterval(() => {
+    const timeSinceLastEvent = Date.now() - monitorState.lastEventTime;
+    if (timeSinceLastEvent > 90000 && monitorState.cycleId) {
+        // Show stale warning
+        const cycleEl = document.getElementById('monitor-cycle-id');
+        if (cycleEl && !cycleEl.textContent.includes('stale')) {
+            cycleEl.textContent += ' (stale)';
+            cycleEl.style.color = '#fbbf24';
+        }
+    }
+}, 10000);
+
+// Load portfolio data
+async function loadPortfolio() {
+    try {
+        const response = await fetch('/api/portfolio');
+        const data = await response.json();
+        
+        if (data.success) {
+            // Update balance
+            document.getElementById('total-balance').textContent = `$${data.balance.total.toFixed(2)}`;
+            
+            // Update positions count
+            const posCount = data.positions.count;
+            const maxPos = 5; // TODO: Get from config
+            document.getElementById('active-positions').textContent = posCount;
+            const posChange = document.querySelector('#active-positions').nextElementSibling;
+            if (posChange) {
+                posChange.textContent = `${posCount} / ${maxPos} max`;
+            }
+            
+            // Update total P&L
+            const totalPnl = data.positions.total_pnl || 0;
+            const pnlElement = document.getElementById('total-pnl');
+            pnlElement.textContent = `$${totalPnl.toFixed(2)}`;
+            const pnlChange = pnlElement.nextElementSibling;
+            if (pnlChange) {
+                const pnlPct = data.positions.avg_pnl_pct || 0;
+                pnlChange.className = pnlPct >= 0 ? 'stat-change positive' : 'stat-change negative';
+                pnlChange.innerHTML = `${pnlPct >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>'} ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+            }
+            
+            // Update win rate
+            const winRate = data.performance?.win_rate || 0;
+            const totalTrades = data.performance?.total_trades || 0;
+            document.getElementById('win-rate').textContent = `${winRate.toFixed(0)}%`;
+            const winRateChange = document.getElementById('win-rate').nextElementSibling;
+            if (winRateChange) {
+                winRateChange.textContent = `${totalTrades} trades`;
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load portfolio:', error);
+    }
+}
+
+// Auto-refresh portfolio every 5 seconds when on Overview page
+let portfolioRefreshInterval = null;
+
+function startPortfolioRefresh() {
+    loadPortfolio();
+    if (!portfolioRefreshInterval) {
+        portfolioRefreshInterval = setInterval(loadPortfolio, 5000);
+    }
+}
+
+function stopPortfolioRefresh() {
+    if (portfolioRefreshInterval) {
+        clearInterval(portfolioRefreshInterval);
+        portfolioRefreshInterval = null;
+    }
+}
 
 // Load settings from server
 async function loadSettings() {
