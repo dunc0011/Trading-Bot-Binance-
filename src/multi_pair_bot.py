@@ -898,16 +898,19 @@ class MultiPairBot:
         error_count = 0
         signal_counts = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
         
-        # Analyze pairs sequentially to maintain progress updates
-        for idx, symbol in enumerate(symbols):
+        # Analyze pairs sequentially - LIMIT to 10 pairs per cycle to prevent blocking RTM
+        max_pairs_per_cycle = 10
+        symbols_to_analyze = symbols[:max_pairs_per_cycle]
+        
+        for idx, symbol in enumerate(symbols_to_analyze):
             pair_start = datetime.now()
-            logger.debug(f"  🔍 [{idx+1}/{total_pairs}] Analyzing {symbol} ({timeframe})")
+            logger.debug(f"  🔍 [{idx+1}/{len(symbols_to_analyze)}] Analyzing {symbol} ({timeframe})")
             
             try:
-                # Analyze with aggressive timeout (5s max per pair to prevent blocking)
+                # Analyze with ultra-aggressive timeout (2s max per pair)
                 result = await asyncio.wait_for(
                     self.analyze_pair(symbol, timeframe),
-                    timeout=5.0
+                    timeout=2.0
                 )
                 
                 signal, klines = result if result else (None, None)
@@ -946,7 +949,7 @@ class MultiPairBot:
                     logger.debug(f"  ⏸  {symbol}: No signal")
                     
             except asyncio.TimeoutError:
-                logger.warning(f"⏱️  [{symbol}] Analysis timed out after 5s - skipping")
+                logger.warning(f"⏱️  [{symbol}] Analysis timed out after 2s - skipping")
                 error_count += 1
                 analyzed_count += 1
                 # Yield to event loop after timeout
