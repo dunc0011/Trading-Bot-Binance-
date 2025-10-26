@@ -45,11 +45,30 @@ class Config:
         self.ml_wfv_splits = int(os.getenv('ML_WFV_SPLITS', '5'))
         
         # Telegram settings
-        self.telegram_token = os.getenv('TELEGRAM_TOKEN', '')
+        self.telegram_enabled = os.getenv('TELEGRAM_NOTIFICATIONS', 'false').lower() == 'true'
+        self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID', '')
         
         # Database
         self.database_url = os.getenv('DATABASE_URL', 'sqlite:///data/trading_bot.db')
+        
+        # Real-time Position Monitoring
+        self.realtime_monitoring_enabled = os.getenv('REALTIME_MONITORING_ENABLED', 'true').lower() == 'true'
+        self.monitor_poll_fallback_interval = float(os.getenv('MONITOR_POLL_FALLBACK_INTERVAL', '1.0'))
+        self.websocket_reconnect_delay = int(os.getenv('WEBSOCKET_RECONNECT_DELAY', '5'))
+        
+        # Exit Logic Thresholds (for real-time monitor)
+        self.partial_exit_1_pct = float(os.getenv('PARTIAL_EXIT_1_PCT', '0.0015'))  # +0.15%
+        self.partial_exit_2_pct = float(os.getenv('PARTIAL_EXIT_2_PCT', '0.0030'))  # +0.30%
+        self.partial_exit_1_size = float(os.getenv('PARTIAL_EXIT_1_SIZE', '0.60'))  # 60%
+        self.partial_exit_2_size = float(os.getenv('PARTIAL_EXIT_2_SIZE', '0.40'))  # 40%
+        self.hard_stop_loss_pct = float(os.getenv('HARD_STOP_LOSS_PCT', '0.0050'))  # -0.50%
+        self.trailing_lock_1_min = float(os.getenv('TRAILING_LOCK_1_MIN', '0.0015'))  # 0.15%
+        self.trailing_lock_1_max = float(os.getenv('TRAILING_LOCK_1_MAX', '0.0030'))  # 0.30%
+        self.trailing_lock_1_keep = float(os.getenv('TRAILING_LOCK_1_KEEP', '0.70'))  # keep 70%
+        self.trailing_lock_2_keep = float(os.getenv('TRAILING_LOCK_2_KEEP', '0.80'))  # keep 80%
+        self.trailing_before_0_2_sl = float(os.getenv('TRAILING_BEFORE_0_2_SL', '0.0020'))  # -0.20%
+        self.monitor_tick_ms = int(os.getenv('MONITOR_TICK_MS', '200'))  # 200ms check interval
         
         # Validate configuration
         self._validate()
@@ -62,5 +81,6 @@ class Config:
         if self.trading_mode not in ['testnet', 'live']:
             raise ValueError(f"Invalid trading mode: {self.trading_mode}")
         
-        if self.max_position_size <= 0:
+        # Validate max_position_size only if it's set (not None)
+        if self.max_position_size is not None and self.max_position_size <= 0:
             raise ValueError("Max position size must be positive")

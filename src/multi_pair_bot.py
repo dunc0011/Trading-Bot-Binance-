@@ -23,6 +23,7 @@ from utils.order_manager import OrderManager
 from utils.continuous_trainer import ContinuousTrainer
 from utils.volume_profile import VolumeProfileAnalyzer
 from utils.microstructure import MicrostructureAnalyzer
+from utils.realtime_position_monitor import RealtimePositionMonitor
 from performance_tracker import PerformanceTracker
 from alerts.telegram_client import TelegramClient
 from monitoring.model_monitor import ModelMonitor
@@ -145,6 +146,22 @@ class MultiPairBot:
         
         # Portfolio-level risk management
         self.portfolio_risk = PortfolioRiskManager(config)
+        
+        # Real-time Position Monitor (WebSocket-based fast exits)
+        self.rtm = None
+        if config.realtime_monitoring_enabled:
+            # Setup dedicated RTM logger
+            rtm_logger = setup_file_logger('rtm', 'logs/multi_pair_bot.log', logging.INFO)
+            # RTM will access order_managers dict after it's populated
+            self.rtm = RealtimePositionMonitor(
+                client=self.client,
+                order_manager=self.order_managers,  # Pass dict for per-symbol access
+                config=config,
+                logger=rtm_logger
+            )
+            logger.info("✅ Real-time Position Monitor enabled")
+        else:
+            logger.info("⚠️  Real-time Position Monitor disabled (using legacy 10s polling)")
         
         logger.info("Multi-Pair Bot initialized")
     
@@ -637,6 +654,15 @@ class MultiPairBot:
                     
                     logger.info(f"✅ {symbol} BUY executed at ${signal['price']:.2f} (${position_size:.0f} @ {ml_confidence*100:.0f}% conf)")
                     
+                    # Register position with Real-time Monitor
+                    if self.rtm and order:
+                        try:
+                            # Get actual fill quantity from order
+                            fill_qty = float(order.get('executedQty', position_size / signal['price']))
+                            await self.rtm.register_position(symbol, signal['price'], fill_qty)
+                        except Exception as e:
+                            logger.error(f"Failed to register position with RTM: {e}")
+                    
                     # Send Telegram alert
                     self.telegram.send_trade_alert({
                         'symbol': symbol,
@@ -660,6 +686,13 @@ class MultiPairBot:
                     position = self.active_positions.pop(symbol)
                     pnl_pct = (signal['price'] - position['entry_price']) / position['entry_price'] * 100
                     pnl_usd = (signal['price'] - position['entry_price']) * (position['size'] / position['entry_price'])
+                    
+                    # Unregister from Real-time Monitor
+                    if self.rtm:
+                        try:
+                            await self.rtm.unregister_position(symbol)
+                        except Exception as e:
+                            logger.error(f"Failed to unregister position from RTM: {e}")
                     
                     # Remove from portfolio risk manager
                     self.portfolio_risk.remove_position(symbol)
@@ -762,13 +795,13 @@ class MultiPairBot:
                     logger.debug(f"🔒 {symbol}: Aggressive trailing stop active")
                 
                 # Ultra-tight trailing for scalping
-                if profit_pct < 0.08:
+                if profit_pct < 0.20:
                     # Very tight stop loss for scalping
                     stop_price = entry_price * 0.998  # -0.2% stop loss
                 elif profit_pct < 0.15:
-                    # Move to break-even quickly at 0.08%
-                    stop_price = entry_price
-                    if profit_pct >= 0.08 and not position.get('break_even_locked'):
+                    # Move past fees at 0.20% (covers 0.15% round-trip fees)
+                    stop_price = entry_price * 1.0005  # Lock in +0.05% after fees
+                    if profit_pct >= 0.20 and not position.get('break_even_locked'):
                         position['break_even_locked'] = True
                         logger.info(f"🔒 {symbol}: Break-even locked at +{profit_pct:.2f}%")
                 elif profit_pct < 0.3:
@@ -855,8 +888,9 @@ class MultiPairBot:
                 'dry_run': self.config.dry_run
             })
         
-        # Check trailing stops for open positions first
-        if self.active_positions:
+        # Check trailing stops for open positions (LEGACY - superseded by RTM)
+        # Only runs if RTM is disabled
+        if self.active_positions and not self.rtm:
             await self.check_trailing_stops()
         
         # Track analysis stats
@@ -1210,6 +1244,14 @@ class MultiPairBot:
         self.running = True
         logger.info("🚀 Entering main trading loop...")
         
+        # Start Real-time Position Monitor
+        if self.rtm:
+            await self.rtm.start()
+            # Register existing positions with RTM
+            for symbol, pos in self.active_positions.items():
+                qty = pos.get('quantity', pos['size'] / pos['entry_price'])
+                await self.rtm.register_position(symbol, pos['entry_price'], qty)
+        
         # Track last model discovery time
         last_model_check = datetime.now()
         model_check_interval = 1800  # Check for new models every 30 minutes
@@ -1309,12 +1351,31 @@ class MultiPairBot:
         
         logger.info("All positions closed.")
     
-    def stop(self):
-        """Stop the bot"""
+    async def async_stop(self):
+        """Async stop for proper RTM cleanup"""
         logger.info("Stopping Multi-Pair Bot...")
         self.running = False
         
+        # Stop Real-time Monitor first
+        if self.rtm:
+            try:
+                await self.rtm.stop()
+                logger.info("✅ RTM stopped")
+            except Exception as e:
+                logger.error(f"Error stopping RTM: {e}")
+        
         # Stop continuous trainer
+        if hasattr(self, 'continuous_trainer'):
+            self.continuous_trainer.stop()
+        
+        logger.info("Bot stopped. Positions will be left open.")
+    
+    def stop(self):
+        """Stop the bot (sync wrapper)"""
+        logger.info("Stopping Multi-Pair Bot...")
+        self.running = False
+        
+        # Note: RTM cleanup will happen on next event loop iteration
         if hasattr(self, 'continuous_trainer'):
             self.continuous_trainer.stop()
         

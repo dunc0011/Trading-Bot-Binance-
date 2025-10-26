@@ -17,7 +17,7 @@ class OrderManager:
         self.active_orders = {}
         self.active_stop_orders = {}  # Track stop-loss orders by symbol
         self.symbol_info_cache = {}  # Cache symbol filters
-        self.use_limit_orders = True  # Use smart limit orders instead of market
+        self.use_limit_orders = False  # Use market orders for instant execution
     
     def _get_symbol_filters(self, symbol):
         """Get LOT_SIZE and NOTIONAL filters for a symbol."""

@@ -11,6 +11,7 @@ from strategies.ml_ema_strategy import MLEMAStrategy
 from strategies.scalping_strategy import ScalpingStrategy
 from utils.risk_manager import RiskManager
 from utils.order_manager import OrderManager
+from utils.telegram_notifier import TelegramNotifier
 
 
 class TradingBot:
@@ -47,6 +48,13 @@ class TradingBot:
         self.risk_manager = RiskManager(config, self.client)
         self.order_manager = OrderManager(self.client, config)
         
+        # Initialize Telegram notifier
+        self.telegram = TelegramNotifier(
+            bot_token=config.telegram_bot_token,
+            chat_id=config.telegram_chat_id,
+            enabled=config.telegram_enabled
+        )
+        
         self.is_running = False
     
     async def start(self):
@@ -59,6 +67,15 @@ class TradingBot:
             account = self.client.get_account()
             self.logger.info(f"Connected to Binance - Account status: {account['accountType']}")
             
+            # Send startup notification
+            await self.telegram.send_status("Bot Started", {
+                "Symbol": self.config.symbol,
+                "Timeframe": self.config.timeframe,
+                "Strategy": self.config.strategy,
+                "Mode": "DRY RUN" if self.config.dry_run else "LIVE",
+                "Trading Mode": self.config.trading_mode
+            })
+            
             # Main trading loop  
             check_interval = 10 if self.config.strategy == 'scalping' else 60  # Fast checks for scalping
             self.logger.info(f"Trading cycle interval: {check_interval}s")
@@ -69,9 +86,11 @@ class TradingBot:
                 
         except BinanceAPIException as e:
             self.logger.error(f"Binance API error: {e}")
+            await self.telegram.send_error(str(e), context="Binance API")
             raise
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}", exc_info=True)
+            await self.telegram.send_error(str(e), context="Bot startup/main loop")
             raise
     
     async def trading_cycle(self):
@@ -89,6 +108,9 @@ class TradingBot:
             
             if signal:
                 self.logger.info(f"Signal detected: {signal['action']} at {signal['price']}")
+                
+                # Send signal notification
+                await self.telegram.send_signal(signal, self.config.symbol)
                 
                 # Check risk management
                 if self.risk_manager.check_risk(signal):
@@ -111,6 +133,9 @@ class TradingBot:
                             price=signal.get('price')
                         )
                     
+                    # Send order notification
+                    await self.telegram.send_order(order, signal['action'], self.config.symbol)
+                    
                     if order:
                         self.logger.info(f"✅ Order executed: {order.get('orderId', 'UNKNOWN')}")
                     else:
@@ -120,8 +145,10 @@ class TradingBot:
             
         except Exception as e:
             self.logger.error(f"Error in trading cycle: {e}", exc_info=True)
+            await self.telegram.send_error(str(e), context="Trading cycle")
     
-    def stop(self):
+    async def stop(self):
         """Stop the trading bot."""
         self.is_running = False
         self.logger.info("Bot stopping...")
+        await self.telegram.send_status("Bot Stopped")

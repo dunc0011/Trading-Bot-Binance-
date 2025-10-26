@@ -151,6 +151,12 @@ class AdvancedMLStrategy:
             else:
                 ml_confidence = 0.6 if prediction == 1 else 0.4
             
+            # LOG PREDICTION FOR DEBUGGING
+            self.logger.debug(
+                f"{self.config.symbol}: ML prediction={prediction}, confidence={ml_confidence:.3f} "
+                f"(threshold={getattr(self.config, 'ml_proba_threshold', 0.55):.2f})"
+            )
+            
             # Record prediction for model monitoring
             if self.model_monitor and prediction == 1:  # Only track BUY signals
                 self.model_monitor.record_prediction(
@@ -166,7 +172,7 @@ class AdvancedMLStrategy:
             result = None
             
             # BUY signal - only if confidence is high enough
-            min_confidence = getattr(self.config, 'ml_proba_threshold', 0.55)
+            min_confidence = getattr(self.config, 'ml_proba_threshold', 0.50)  # Lowered from 0.55
             
             if prediction == 1 and ml_confidence >= min_confidence and self.position != 'long':
                 # Get market indicators
@@ -182,45 +188,38 @@ class AdvancedMLStrategy:
                 
                 # ===== ENTRY QUALITY FILTERS (PREVENT BUYING TOPS) =====
                 
-                # 1) Block entries near recent highs (buying into resistance)
+                # 1) Block entries near recent highs (buying into resistance) - RELAXED
                 recent_high_20 = df['high'].rolling(20).max().iloc[-1]
                 distance_from_high = (recent_high_20 - current_price) / current_price
-                if distance_from_high < 0.005:  # Within 0.5% of 20-bar high
+                if distance_from_high < 0.002:  # Within 0.2% of 20-bar high (was 0.5%)
                     self.logger.debug(f"❌ Skipping: Near recent high (${current_price:.2f} vs ${recent_high_20:.2f})")
                     return None
                 
-                # 2) Require pullback in trending markets (don't chase)
+                # 2) Require pullback in trending markets (don't chase) - RELAXED
                 ema_21 = latest_features.get('ema_21', pd.Series([current_price])).iloc[0]
                 price_above_ema = (current_price - ema_21) / current_price
-                if is_trending and price_above_ema > 0.008:  # More than 0.8% above EMA21
+                if is_trending and price_above_ema > 0.015:  # More than 1.5% above EMA21 (was 0.8%)
                     self.logger.debug(f"❌ Skipping: Price too extended from EMA21 ({price_above_ema*100:.2f}%)")
                     return None
                 
-                # 3) Check bid-ask spread (avoid wide spreads = low liquidity)
-                try:
-                    ticker = df  # We have OHLCV, estimate spread from high-low
-                    recent_spread_pct = ((df['high'].iloc[-1] - df['low'].iloc[-1]) / current_price).mean()
-                    if recent_spread_pct > 0.003:  # Spread > 0.3%
-                        self.logger.debug(f"❌ Skipping: Wide spread ({recent_spread_pct*100:.2f}%)")
-                        return None
-                except:
-                    pass  # If spread check fails, continue
+                # 3) Check bid-ask spread (avoid wide spreads = low liquidity) - DISABLED for now
+                # Crypto markets are liquid enough at these volumes
+                pass
                 
-                # 4) Require favorable recent momentum (price moving up, not down)
+                # 4) Require favorable recent momentum (price moving up, not down) - RELAXED
                 recent_bars_green = (df['close'].iloc[-3:] > df['open'].iloc[-3:]).sum()
-                if recent_bars_green < 2:  # Less than 2/3 recent bars are green
-                    self.logger.debug(f"❌ Skipping: Recent bars bearish ({recent_bars_green}/3 green)")
+                if recent_bars_green == 0:  # All 3 bars bearish (was requiring 2/3 green)
+                    self.logger.debug(f"❌ Skipping: All recent bars bearish")
                     return None
                 
-                # 5) Extreme RSI filters (keep existing)
-                if rsi > 75:  # Overbought (lowered from 85 to be stricter)
+                # 5) Extreme RSI filters - RELAXED
+                if rsi > 85:  # Overbought (was 75, now 85)
                     self.logger.debug(f"❌ Skipping: Overbought RSI ({rsi:.1f})")
                     return None
                 
-                if rsi < 15:  # Extremely oversold - but this could be a bounce opportunity
-                    if not is_trending:  # Only skip in ranging markets
-                        self.logger.debug(f"❌ Skipping: Oversold in ranging market RSI ({rsi:.1f})")
-                        return None
+                if rsi < 10:  # Extremely oversold (was 15, now 10)
+                    self.logger.debug(f"❌ Skipping: Extremely oversold RSI ({rsi:.1f})")
+                    return None
                 
                 # Set regime-specific parameters that will be used by risk manager
                 regime_params = {
