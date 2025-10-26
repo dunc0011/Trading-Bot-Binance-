@@ -874,8 +874,13 @@ class MultiPairBot:
         total_pairs = len(symbols)
         timeframe = self.config.timeframe
         
+        # Analyze pairs sequentially - LIMIT to 10 pairs per cycle to prevent blocking RTM
+        max_pairs_per_cycle = 10
+        symbols_to_analyze = symbols[:max_pairs_per_cycle]
+        pairs_this_cycle = len(symbols_to_analyze)
+        
         # Log cycle start
-        logger.info(f"🔄 Trading cycle started [{self.current_cycle_id}] - Analyzing {total_pairs} pairs...")
+        logger.info(f"🔄 Trading cycle started [{self.current_cycle_id}] - Analyzing {pairs_this_cycle} of {total_pairs} pairs...")
         
         # Emit cycle_start event
         if self.socketio:
@@ -883,8 +888,8 @@ class MultiPairBot:
                 'cycle_id': self.current_cycle_id,
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'timeframe': timeframe,
-                'pairs': symbols,
-                'total_pairs': total_pairs,
+                'pairs': symbols_to_analyze,  # Only pairs being analyzed this cycle
+                'total_pairs': pairs_this_cycle,  # Show actual pairs this cycle
                 'dry_run': self.config.dry_run
             })
         
@@ -897,10 +902,6 @@ class MultiPairBot:
         analyzed_count = 0
         error_count = 0
         signal_counts = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
-        
-        # Analyze pairs sequentially - LIMIT to 10 pairs per cycle to prevent blocking RTM
-        max_pairs_per_cycle = 10
-        symbols_to_analyze = symbols[:max_pairs_per_cycle]
         
         for idx, symbol in enumerate(symbols_to_analyze):
             pair_start = datetime.now()
@@ -937,8 +938,8 @@ class MultiPairBot:
                         'reason': signal.get('reason', 'No signal') if signal else 'No signal',
                         'elapsed_ms': elapsed_ms,
                         'analyzed_index': idx + 1,
-                        'total_pairs': total_pairs,
-                        'progress': (idx + 1) / total_pairs
+                        'total_pairs': pairs_this_cycle,
+                        'progress': (idx + 1) / pairs_this_cycle
                     })
                 
                 # Execute signal if present
@@ -964,8 +965,8 @@ class MultiPairBot:
                         'reason': 'Analysis timeout',
                         'error': True,
                         'analyzed_index': idx + 1,
-                        'total_pairs': total_pairs,
-                        'progress': (idx + 1) / total_pairs
+                        'total_pairs': pairs_this_cycle,
+                        'progress': (idx + 1) / pairs_this_cycle
                     })
                     
             except Exception as e:
@@ -982,8 +983,8 @@ class MultiPairBot:
                         'reason': str(e),
                         'error': True,
                         'analyzed_index': idx + 1,
-                        'total_pairs': total_pairs,
-                        'progress': (idx + 1) / total_pairs
+                        'total_pairs': pairs_this_cycle,
+                        'progress': (idx + 1) / pairs_this_cycle
                     })
         
         # Calculate cycle duration
