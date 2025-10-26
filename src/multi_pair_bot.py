@@ -904,14 +904,18 @@ class MultiPairBot:
             logger.debug(f"  🔍 [{idx+1}/{total_pairs}] Analyzing {symbol} ({timeframe})")
             
             try:
-                # Analyze with timeout
+                # Analyze with aggressive timeout (5s max per pair to prevent blocking)
                 result = await asyncio.wait_for(
                     self.analyze_pair(symbol, timeframe),
-                    timeout=30.0
+                    timeout=5.0
                 )
                 
                 signal, klines = result if result else (None, None)
                 analyzed_count += 1
+                
+                # Yield control to event loop every few pairs so RTM can run
+                if idx % 5 == 0:
+                    await asyncio.sleep(0)
                 
                 # Determine signal type
                 signal_type = signal['action'] if signal else 'HOLD'
@@ -942,9 +946,11 @@ class MultiPairBot:
                     logger.debug(f"  ⏸  {symbol}: No signal")
                     
             except asyncio.TimeoutError:
-                logger.error(f"⏱️  [{symbol}] Analysis timed out after 30s")
+                logger.warning(f"⏱️  [{symbol}] Analysis timed out after 5s - skipping")
                 error_count += 1
                 analyzed_count += 1
+                # Yield to event loop after timeout
+                await asyncio.sleep(0)
                 
                 if self.socketio:
                     self.socketio.emit('pair_analysis_complete', {

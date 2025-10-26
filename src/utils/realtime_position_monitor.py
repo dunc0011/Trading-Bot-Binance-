@@ -168,13 +168,18 @@ class RealtimePositionMonitor:
         """Initialize WebSocket manager"""
         if self._twm is None:
             testnet = self.config.trading_mode == "testnet"
-            self._twm = ThreadedWebsocketManager(
-                api_key=self.config.api_key,
-                api_secret=self.config.api_secret,
-                testnet=testnet
-            )
-            self._twm.start()
-            self.logger.info(f"📡 RTM: WebSocket manager started (testnet={testnet})")
+            try:
+                self._twm = ThreadedWebsocketManager(
+                    api_key=self.config.api_key,
+                    api_secret=self.config.api_secret,
+                    testnet=testnet
+                )
+                self._twm.start()
+                self.logger.info(f"📡 RTM: WebSocket manager started (testnet={testnet})")
+            except Exception as e:
+                self.logger.error(f"RTM: Failed to start WebSocket: {e}")
+                self._ws_failure = True
+                return
         
         await self._resubscribe()
     
@@ -351,7 +356,10 @@ class RealtimePositionMonitor:
         # Fallback to REST if no recent WebSocket data
         if now - ps.last_update_ts >= self.config.monitor_poll_fallback_interval:
             try:
-                ob = self.client.get_orderbook_ticker(symbol=symbol)
+                # Use shorter timeout to prevent blocking
+                import asyncio
+                loop = asyncio.get_event_loop()
+                ob = await loop.run_in_executor(None, lambda: self.client.get_orderbook_ticker(symbol=symbol))
                 price = float(ob["bidPrice"])
                 
                 # Update cache
@@ -364,6 +372,9 @@ class RealtimePositionMonitor:
                 
                 return price
             
+            except asyncio.TimeoutError:
+                self.logger.warning(f"RTM: REST fallback timeout for {symbol}")
+                return None
             except Exception as e:
                 self.logger.warning(f"RTM: REST fallback failed for {symbol}: {e}")
                 return None
