@@ -908,6 +908,9 @@ class MultiPairBot:
             logger.debug(f"  🔍 [{idx+1}/{len(symbols_to_analyze)}] Analyzing {symbol} ({timeframe})")
             
             try:
+                # Yield to event loop BEFORE each analysis so RTM can run
+                await asyncio.sleep(0.1)  # 100ms pause for RTM
+                
                 # Analyze with ultra-aggressive timeout (2s max per pair)
                 result = await asyncio.wait_for(
                     self.analyze_pair(symbol, timeframe),
@@ -916,10 +919,6 @@ class MultiPairBot:
                 
                 signal, klines = result if result else (None, None)
                 analyzed_count += 1
-                
-                # Yield control to event loop every few pairs so RTM can run
-                if idx % 5 == 0:
-                    await asyncio.sleep(0)
                 
                 # Determine signal type
                 signal_type = signal['action'] if signal else 'HOLD'
