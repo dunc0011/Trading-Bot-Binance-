@@ -39,11 +39,35 @@
                     </svg>
                     <span>Positions</span>
                 </a>
+                <a href="#" class="nav-item" data-tab="analytics">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                    </svg>
+                    <span>Analytics</span>
+                </a>
                 <a href="#" class="nav-item" data-tab="training">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M12 2v20M2 12h20"/>
                     </svg>
                     <span>ML Training</span>
+                </a>
+                <a href="/rl" class="nav-item" onclick="window.location.href='/rl'; return false;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                    </svg>
+                    <span>RL Training</span>
+                </a>
+                <a href="/learning" class="nav-item" onclick="window.location.href='/learning'; return false;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 3v18h18"/><path d="M18 17l-4-4-3 3-4-4"/>
+                    </svg>
+                    <span>Learning Analytics</span>
+                </a>
+                <a href="http://localhost:6006" class="nav-item" target="_blank">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                    </svg>
+                    <span>TensorBoard</span>
                 </a>
                 <a href="#" class="nav-item" data-tab="logs">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -107,25 +131,40 @@
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-label">Total Balance</div>
-                    <div class="stat-value" id="total-balance">$141.70</div>
-                    <div class="stat-change positive">+0.00% (24h)</div>
+                    <div class="stat-value" id="total-balance">
+                        <span class="loading-spinner" style="display: none;"></span>
+                        $0.00
+                    </div>
+                    <div class="stat-change" id="balance-change">Loading...</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Active Positions</div>
-                    <div class="stat-value" id="active-positions">0</div>
-                    <div class="stat-change">0 / 5 max</div>
+                    <div class="stat-value" id="active-positions">
+                        <span class="loading-spinner" style="display: none;"></span>
+                        0
+                    </div>
+                    <div class="stat-change" id="positions-limit">0 / 5 max</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Total P&L</div>
-                    <div class="stat-value" id="total-pnl">$0.00</div>
-                    <div class="stat-change positive">+0.00%</div>
+                    <div class="stat-value" id="total-pnl">
+                        <span class="loading-spinner" style="display: none;"></span>
+                        $0.00
+                    </div>
+                    <div class="stat-change" id="pnl-change">+0.00%</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Win Rate</div>
-                    <div class="stat-value" id="win-rate">0%</div>
-                    <div class="stat-change">0 trades</div>
+                    <div class="stat-value" id="win-rate">
+                        <span class="loading-spinner" style="display: none;"></span>
+                        0%
+                    </div>
+                    <div class="stat-change" id="trade-count">0 trades</div>
                 </div>
             </div>
+
+            <!-- Error Display -->
+            <div id="dashboard-errors" style="display: none;"></div>
 
             <!-- Performance Chart -->
             <div class="card">
@@ -312,15 +351,26 @@
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">🔓 Active Positions</h2>
-                        <button class="btn btn-secondary" onclick="loadPositions()">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                            </svg>
-                            Refresh
-                        </button>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-secondary btn-sm" onclick="exportPositions()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                Export
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="loadPositions()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                                Refresh
+                            </button>
+                        </div>
                     </div>
                     <div id="positions-table">
-                        <p class="text-muted" style="text-align: center; padding: 40px;">No active positions</p>
+                        <div class="loading-overlay" id="positions-loading" style="display: none;">
+                            <div class="spinner"></div>
+                        </div>
+                        <p class="text-muted" style="text-align: center; padding: 40px;">Loading positions...</p>
                     </div>
                 </div>
 
@@ -328,15 +378,32 @@
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">📜 Recent Trades</h2>
-                        <button class="btn btn-secondary" onclick="loadRecentTrades()">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                            </svg>
-                            Refresh
-                        </button>
+                        <div style="display: flex; gap: 8px;">
+                            <div class="search-container" style="width: 200px;">
+                                <input type="text" id="trades-search" class="search-input" placeholder="Search trades..." oninput="filterTrades()">
+                                <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                                </svg>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" onclick="exportTrades()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                Export
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="loadRecentTrades()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                                Refresh
+                            </button>
+                        </div>
                     </div>
                     <div id="recent-trades">
-                        <p class="text-muted" style="text-align: center; padding: 40px;">No recent trades</p>
+                        <div class="loading-overlay" id="trades-loading" style="display: none;">
+                            <div class="spinner"></div>
+                        </div>
+                        <p class="text-muted" style="text-align: center; padding: 40px;">Loading trades...</p>
                     </div>
                 </div>
 
@@ -347,6 +414,11 @@
                         <p class="text-muted" style="text-align: center; padding: 40px;">Waiting for bot activity...</p>
                     </div>
                 </div>
+            </div>
+
+            <!-- Analytics Tab -->
+            <div id="page-analytics" class="tab-content">
+                <iframe src="/analytics" style="width: 100%; height: calc(100vh - 100px); border: none; border-radius: 12px;"></iframe>
             </div>
 
             <!-- Training Tab -->
@@ -619,6 +691,16 @@
         </main>
     </div>
 
-    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+    <!-- Theme Toggle -->
+    <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+    </button>
+
+    <!-- Notifications Container -->
+    <div id="notifications" class="notifications"></div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=20251031"></script>
 </body>
 </html>

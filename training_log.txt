@@ -1,0 +1,233 @@
+🚀 Training models for top tradeable USDT pairs...
+
+📊 Fetching 24h ticker data for all USDT pairs...
+
+✅ Found 50 pairs to train
+
+Top 10 pairs by 24h volume:
+   1. BTCUSDT         - $866.2M volume
+   2. ETHUSDT         - $789.0M volume
+   3. USDCUSDT        - $588.5M volume
+   4. SOLUSDT         - $338.1M volume
+   5. XRPUSDT         - $233.0M volume
+   6. BNBUSDT         - $209.2M volume
+   7. ZECUSDT         - $189.6M volume
+   8. FDUSDUSDT       - $158.8M volume
+   9. GIGGLEUSDT      - $147.6M volume
+  10. VIRTUALUSDT     - $113.9M volume
+
+🎯 Training models for top 50 pairs...
+============================================================
+
+[1/50] Training BTCUSDT...
+  ❌ BTCUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[2/50] Training ETHUSDT...
+  ❌ ETHUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[3/50] Training USDCUSDT...
+  ❌ USDCUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[4/50] Training SOLUSDT...
+  ❌ SOLUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[5/50] Training XRPUSDT...
+  ❌ XRPUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[6/50] Training BNBUSDT...
+  ❌ BNBUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[7/50] Training ZECUSDT...
+  ❌ ZECUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[8/50] Training FDUSDUSDT...
+  ❌ FDUSDUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[9/50] Training GIGGLEUSDT...
+  ❌ GIGGLEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[10/50] Training VIRTUALUSDT...
+  ❌ VIRTUALUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[11/50] Training DOGEUSDT...
+  ❌ DOGEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[12/50] Training ASTERUSDT...
+  ❌ ASTERUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[13/50] Training TRXUSDT...
+  ❌ TRXUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[14/50] Training SUIUSDT...
+  ❌ SUIUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[15/50] Training AIXBTUSDT...
+  ❌ AIXBTUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[16/50] Training USDEUSDT...
+  ❌ USDEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[17/50] Training PUMPUSDT...
+  ❌ PUMPUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[18/50] Training XPLUSDT...
+  ❌ XPLUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[19/50] Training AVAXUSDT...
+  ❌ AVAXUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[20/50] Training TAOUSDT...
+  ❌ TAOUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[21/50] Training BCHUSDT...
+  ❌ BCHUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[22/50] Training LINKUSDT...
+  ❌ LINKUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[23/50] Training EDENUSDT...
+  ❌ EDENUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[24/50] Training AVNTUSDT...
+  ❌ AVNTUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[25/50] Training ADAUSDT...
+  ❌ ADAUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[26/50] Training ENAUSDT...
+  ❌ ENAUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[27/50] Training YBUSDT...
+  ❌ YBUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[28/50] Training PEPEUSDT...
+  ❌ PEPEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[29/50] Training WLFIUSDT...
+  ❌ WLFIUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[30/50] Training ZBTUSDT...
+  ❌ ZBTUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[31/50] Training TURTLEUSDT...
+  ❌ TURTLEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[32/50] Training PENGUUSDT...
+  ❌ PENGUUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[33/50] Training ZENUSDT...
+  ❌ ZENUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[34/50] Training WLDUSDT...
+  ❌ WLDUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[35/50] Training ENSOUSDT...
+  ❌ ENSOUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[36/50] Training ZKCUSDT...
+  ❌ ZKCUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[37/50] Training LTCUSDT...
+  ❌ LTCUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[38/50] Training HIFIUSDT...
+  ❌ HIFIUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[39/50] Training KDAUSDT...
+  ❌ KDAUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[40/50] Training UNIUSDT...
+  ❌ UNIUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[41/50] Training DEGOUSDT...
+  ❌ DEGOUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[42/50] Training DASHUSDT...
+  ❌ DASHUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[43/50] Training NEARUSDT...
+  ❌ NEARUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[44/50] Training BAKEUSDT...
+  ❌ BAKEUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[45/50] Training BIOUSDT...
+  ❌ BIOUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[46/50] Training SLFUSDT...
+  ❌ SLFUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[47/50] Training PAXGUSDT...
+  ❌ PAXGUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[48/50] Training EIGENUSDT...
+  ❌ EIGENUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[49/50] Training TRUMPUSDT...
+  ❌ TRUMPUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+[50/50] Training EULUSDT...
+  ❌ EULUSDT failed: /usr/local/bin/python: No module named src.utils.train_advanced_ml
+
+
+============================================================
+
+📊 Training Summary:
+  ✅ Succeeded: 0
+  ❌ Failed: 50
+
+❌ Failed pairs: BTCUSDT, ETHUSDT, USDCUSDT, SOLUSDT, XRPUSDT, BNBUSDT, ZECUSDT, FDUSDUSDT, GIGGLEUSDT, VIRTUALUSDT
+   ...and 40 more
+
+🎉 Training complete!
+
+✅ Done! Restart the bot to load new models.

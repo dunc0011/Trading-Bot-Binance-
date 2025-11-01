@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learning Analytics - Trading Bot</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        .main-container {
+            max-width: 1600px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        
+        .card {
+            border: none;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            margin-bottom: 2rem;
+            background: white;
+        }
+        
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px 15px 0 0 !important;
+            padding: 1.5rem;
+            font-weight: 600;
+            font-size: 1.2rem;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+            border-radius: 15px;
+            padding: 1.5rem;
+            text-align: center;
+            height: 100%;
+        }
+        
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #333;
+            margin: 0;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 0.5rem;
+        }
+        
+        .stat-positive {
+            color: #28a745 !important;
+        }
+        
+        .stat-negative {
+            color: #dc3545 !important;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin: 1rem 0;
+        }
+        
+        .trade-row {
+            border-bottom: 1px solid #e9ecef;
+            padding: 1rem;
+            transition: background 0.2s;
+        }
+        
+        .trade-row:hover {
+            background: #f8f9fa;
+        }
+        
+        .trade-profit {
+            font-weight: 600;
+        }
+        
+        .badge-regime {
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+        
+        .regime-trending {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+        }
+        
+        .regime-ranging {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+        
+        .regime-volatile {
+            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+            color: #333;
+        }
+        
+        .nav-link {
+            color: white !important;
+            font-weight: 600;
+            padding: 0.75rem 1.5rem;
+            border-radius: 10px;
+            transition: all 0.3s;
+        }
+        
+        .nav-link:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark mb-4" style="background: rgba(0, 0, 0, 0.3);">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="bi bi-robot"></i> Trading Bot
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">
+                    <i class="bi bi-speedometer2"></i> Dashboard
+                </a>
+                <a class="nav-link" href="/rl">
+                    <i class="bi bi-brain"></i> RL Training
+                </a>
+                <a class="nav-link active" href="/learning">
+                    <i class="bi bi-graph-up-arrow"></i> Learning Analytics
+                </a>
+                <a class="nav-link" href="http://localhost:6006" target="_blank">
+                    <i class="bi bi-graph-up"></i> TensorBoard
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <!-- Statistics Overview -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <p class="stat-value" id="totalTrades">-</p>
+                    <p class="stat-label">Total Trades</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <p class="stat-value" id="winRate">-</p>
+                    <p class="stat-label">Win Rate</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <p class="stat-value" id="avgProfit">-</p>
+                    <p class="stat-label">Avg Profit %</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <p class="stat-value" id="totalProfit">-</p>
+                    <p class="stat-label">Total Profit</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 1 -->
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-graph-up"></i> Cumulative Returns
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="cumulativeReturnsChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-bar-chart-line"></i> Daily Win Rate
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="winRateChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 2 -->
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-speedometer2"></i> Confidence Distribution
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="confidenceChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-pie-chart"></i> Regime Performance
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="regimeChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Trades Table -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-list-ul"></i> Recent Trades</span>
+                <button class="btn btn-sm btn-light" onclick="loadData()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="tradesTable">
+                    <div class="text-center text-muted py-4">
+                        <div class="spinner-border" role="status"></div>
+                        <p class="mt-2">Loading trades...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let charts = {};
+
+        // Load data on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadData();
+            setInterval(loadData, 30000); // Refresh every 30s
+        });
+
+        async function loadData() {
+            await Promise.all([
+                loadStats(),
+                loadPerformance(),
+                loadTrades()
+            ]);
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/learning/stats');
+                const result = await response.json();
+
+                if (result.success) {
+                    const stats = result.stats;
+                    
+                    document.getElementById('totalTrades').textContent = stats.total_trades;
+                    document.getElementById('winRate').textContent = (stats.win_rate * 100).toFixed(1) + '%';
+                    
+                    const avgProfit = stats.avg_profit_pct;
+                    document.getElementById('avgProfit').textContent = avgProfit.toFixed(2) + '%';
+                    document.getElementById('avgProfit').className = 'stat-value ' + (avgProfit >= 0 ? 'stat-positive' : 'stat-negative');
+                    
+                    const totalProfit = stats.total_profit;
+                    document.getElementById('totalProfit').textContent = '$' + totalProfit.toFixed(2);
+                    document.getElementById('totalProfit').className = 'stat-value ' + (totalProfit >= 0 ? 'stat-positive' : 'stat-negative');
+                    
+                    // Update regime chart if we have data
+                    if (stats.regime_performance && Object.keys(stats.regime_performance).length > 0) {
+                        updateRegimeChart(stats.regime_performance);
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        async function loadPerformance() {
+            try {
+                const response = await fetch('/api/learning/performance');
+                const result = await response.json();
+
+                if (result.success) {
+                    updateCumulativeReturnsChart(result.cumulative_returns);
+                    updateWinRateChart(result.performance);
+                }
+            } catch (error) {
+                console.error('Error loading performance:', error);
+            }
+        }
+
+        async function loadTrades() {
+            try {
+                const response = await fetch('/api/learning/trades?limit=50');
+                const result = await response.json();
+
+                if (result.success && result.trades.length > 0) {
+                    const tradesHtml = result.trades.map(trade => {
+                        const profit = trade.profit_loss_pct;
+                        const profitClass = profit >= 0 ? 'text-success' : 'text-danger';
+                        const regimeClass = 'regime-' + (trade.regime || 'ranging').toLowerCase();
+                        
+                        return `
+                            <div class="trade-row">
+                                <div class="row align-items-center">
+                                    <div class="col-md-2">
+                                        <strong>${trade.symbol}</strong><br>
+                                        <small class="text-muted">${new Date(trade.timestamp).toLocaleString()}</small>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">Entry</small><br>
+                                        $${trade.entry_price.toFixed(2)}
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">Exit</small><br>
+                                        $${trade.exit_price.toFixed(2)}
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">P/L</small><br>
+                                        <strong class="trade-profit ${profitClass}">${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">Confidence</small><br>
+                                        ${(trade.ml_confidence * 100).toFixed(0)}%
+                                    </div>
+                                    <div class="col-md-2">
+                                        <span class="badge-regime ${regimeClass}">${trade.regime || 'Unknown'}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    document.getElementById('tradesTable').innerHTML = tradesHtml;
+                    
+                    // Update confidence distribution
+                    updateConfidenceChart(result.trades);
+                } else {
+                    document.getElementById('tradesTable').innerHTML = `
+                        <div class="text-center text-muted py-4">
+                            <i class="bi bi-inbox" style="font-size: 3rem;"></i>
+                            <p class="mt-2">No trades yet. Start trading to see analytics!</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading trades:', error);
+            }
+        }
+
+        function updateCumulativeReturnsChart(data) {
+            const ctx = document.getElementById('cumulativeReturnsChart');
+            
+            if (charts.cumulative) {
+                charts.cumulative.destroy();
+            }
+            
+            charts.cumulative = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.map(d => d.date),
+                    datasets: [{
+                        label: 'Cumulative Return %',
+                        data: data.map(d => d.cumulative_return),
+                        borderColor: 'rgb(102, 126, 234)',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: {
+                            ticks: {
+                                callback: value => value.toFixed(2) + '%'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateWinRateChart(data) {
+            const ctx = document.getElementById('winRateChart');
+            
+            if (charts.winRate) {
+                charts.winRate.destroy();
+            }
+            
+            charts.winRate = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.date),
+                    datasets: [{
+                        label: 'Win Rate %',
+                        data: data.map(d => d.win_rate * 100),
+                        backgroundColor: 'rgba(118, 75, 162, 0.7)',
+                        borderColor: 'rgb(118, 75, 162)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 100,
+                            ticks: {
+                                callback: value => value + '%'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateConfidenceChart(trades) {
+            const ctx = document.getElementById('confidenceChart');
+            
+            // Group by confidence buckets
+            const buckets = {
+                '0-20%': 0,
+                '20-40%': 0,
+                '40-60%': 0,
+                '60-80%': 0,
+                '80-100%': 0
+            };
+            
+            trades.forEach(trade => {
+                const conf = trade.ml_confidence * 100;
+                if (conf < 20) buckets['0-20%']++;
+                else if (conf < 40) buckets['20-40%']++;
+                else if (conf < 60) buckets['40-60%']++;
+                else if (conf < 80) buckets['60-80%']++;
+                else buckets['80-100%']++;
+            });
+            
+            if (charts.confidence) {
+                charts.confidence.destroy();
+            }
+            
+            charts.confidence = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(buckets),
+                    datasets: [{
+                        label: 'Number of Trades',
+                        data: Object.values(buckets),
+                        backgroundColor: [
+                            'rgba(220, 53, 69, 0.7)',
+                            'rgba(255, 193, 7, 0.7)',
+                            'rgba(13, 202, 240, 0.7)',
+                            'rgba(25, 135, 84, 0.7)',
+                            'rgba(102, 126, 234, 0.7)'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+
+        function updateRegimeChart(regimeStats) {
+            const ctx = document.getElementById('regimeChart');
+            
+            const regimes = Object.keys(regimeStats);
+            const winRates = regimes.map(r => (regimeStats[r].win_rate || 0) * 100);
+            
+            if (charts.regime) {
+                charts.regime.destroy();
+            }
+            
+            charts.regime = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: regimes.map(r => r.charAt(0).toUpperCase() + r.slice(1)),
+                    datasets: [{
+                        label: 'Win Rate %',
+                        data: winRates,
+                        backgroundColor: [
+                            'rgba(79, 172, 254, 0.8)',
+                            'rgba(240, 147, 251, 0.8)',
+                            'rgba(255, 236, 210, 0.8)'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

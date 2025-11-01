@@ -21,8 +21,8 @@ class PortfolioRiskManager:
         self.logger = logging.getLogger(__name__)
         
         # Risk limits
-        self.max_portfolio_drawdown_pct = 0.15  # 15% max drawdown
-        self.max_daily_loss_pct = 0.05          # 5% max daily loss
+        self.max_portfolio_drawdown_pct = 0.50  # 50% max drawdown (testnet - aggressive)
+        self.max_daily_loss_pct = 0.15          # 15% max daily loss
         self.var_confidence = 0.95              # 95% VaR
         self.var_lookback_days = 30             # 30 days for VaR calculation
         

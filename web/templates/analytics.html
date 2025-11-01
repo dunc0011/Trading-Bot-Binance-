@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics - TradingBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .stat-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .stat-card h3 {
+            margin: 0 0 15px 0;
+            font-size: 1.1rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 10px;
+        }
+        
+        .insight-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        
+        .insight-item {
+            padding: 12px;
+            margin: 8px 0;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border-left: 3px solid var(--accent-color);
+        }
+        
+        .insight-item .symbol {
+            font-weight: 600;
+            color: var(--accent-color);
+        }
+        
+        .insight-item .metric {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        
+        .metric.positive {
+            color: var(--success-color);
+        }
+        
+        .metric.negative {
+            color: var(--error-color);
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--border-color);
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 1rem;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+        
+        .tab.active {
+            color: var(--accent-color);
+            border-bottom-color: var(--accent-color);
+        }
+        
+        .tab:hover {
+            color: var(--text-primary);
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--border-color);
+            border-top-color: var(--accent-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state h3 {
+            margin: 0 0 10px 0;
+            color: var(--text-primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🤖</span>
+                <div>
+                    <h1>TradingBot</h1>
+                    <p>MULTI-PAIR ML SCANNER</p>
+                </div>
+            </div>
+            
+            <nav class="nav-menu">
+                <a href="/" class="nav-link">
+                    <span class="nav-icon">🏠</span>
+                    <span>Overview</span>
+                </a>
+                
+                <a href="/?tab=scanner" class="nav-link">
+                    <span class="nav-icon">🔍</span>
+                    <span>Market Scanner</span>
+                </a>
+                
+                <a href="/?tab=positions" class="nav-link">
+                    <span class="nav-icon">📊</span>
+                    <span>Positions</span>
+                </a>
+                
+                <a href="/analytics" class="nav-link active">
+                    <span class="nav-icon">📈</span>
+                    <span>Analytics</span>
+                </a>
+                
+                <a href="/?tab=training" class="nav-link">
+                    <span class="nav-icon">🧠</span>
+                    <span>ML Training</span>
+                </a>
+                
+                <a href="/?tab=logs" class="nav-link">
+                    <span class="nav-icon">📝</span>
+                    <span>Logs</span>
+                </a>
+                
+                <a href="/?tab=settings" class="nav-link">
+                    <span class="nav-icon">⚙️</span>
+                    <span>Settings</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main">
+            <header class="header">
+                <h2>📈 Performance Analytics</h2>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="refreshAnalytics()">
+                        🔄 Refresh
+                    </button>
+                </div>
+            </header>
+
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('overview')">Overview</button>
+                <button class="tab" onclick="switchTab('symbols')">By Symbol</button>
+                <button class="tab" onclick="switchTab('time')">By Time</button>
+                <button class="tab" onclick="switchTab('confidence')">ML Confidence</button>
+                <button class="tab" onclick="switchTab('regimes')">Market Regimes</button>
+            </div>
+
+            <!-- Overview Tab -->
+            <div id="overview" class="tab-content active">
+                <div class="analytics-grid">
+                    <!-- Overall Stats -->
+                    <div class="stat-card">
+                        <h3>📊 Overall Performance (30 Days)</h3>
+                        <div id="overall-stats" class="loading">
+                            <div class="spinner"></div>
+                        </div>
+                    </div>
+
+                    <!-- Daily P&L Chart -->
+                    <div class="stat-card">
+                        <h3>💰 Daily P&L Trend</h3>
+                        <div class="chart-container">
+                            <canvas id="daily-pnl-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Win Rate by Confidence -->
+                    <div class="stat-card">
+                        <h3>🎯 Win Rate vs ML Confidence</h3>
+                        <div class="chart-container">
+                            <canvas id="confidence-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Top Performers -->
+                    <div class="stat-card">
+                        <h3>🏆 Top Performing Pairs</h3>
+                        <ul id="top-pairs" class="insight-list">
+                            <li class="loading"><div class="spinner"></div></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- By Symbol Tab -->
+            <div id="symbols" class="tab-content">
+                <div class="stat-card">
+                    <h3>📊 Performance by Trading Pair</h3>
+                    <div class="chart-container" style="height: 500px;">
+                        <canvas id="symbols-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- By Time Tab -->
+            <div id="time" class="tab-content">
+                <div class="analytics-grid">
+                    <div class="stat-card">
+                        <h3>⏰ Performance by Hour</h3>
+                        <div class="chart-container">
+                            <canvas id="hour-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>📅 Performance by Day of Week</h3>
+                        <div class="chart-container">
+                            <canvas id="day-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ML Confidence Tab -->
+            <div id="confidence" class="tab-content">
+                <div class="analytics-grid">
+                    <div class="stat-card">
+                        <h3>🎯 Win Rate by Confidence Level</h3>
+                        <div class="chart-container">
+                            <canvas id="confidence-win-rate-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>💵 Avg P&L by Confidence Level</h3>
+                        <div class="chart-container">
+                            <canvas id="confidence-pnl-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Market Regimes Tab -->
+            <div id="regimes" class="tab-content">
+                <div class="analytics-grid">
+                    <div class="stat-card">
+                        <h3>🌊 Performance by Market Regime</h3>
+                        <div class="chart-container">
+                            <canvas id="regime-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>⏱️ Optimal Hold Duration</h3>
+                        <div class="chart-container">
+                            <canvas id="duration-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let charts = {};
+
+        // Switch tabs
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Update content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tabName).classList.add('active');
+            
+            // Load data if not loaded
+            if (tabName === 'symbols' && !charts.symbols) {
+                loadSymbolsData();
+            } else if (tabName === 'time' && !charts.hour) {
+                loadTimeData();
+            } else if (tabName === 'confidence' && !charts.confidenceWinRate) {
+                loadConfidenceData();
+            } else if (tabName === 'regimes' && !charts.regime) {
+                loadRegimeData();
+            }
+        }
+
+        // Refresh all analytics
+        function refreshAnalytics() {
+            location.reload();
+        }
+
+        // Load overall stats
+        async function loadOverallStats() {
+            try {
+                const response = await fetch('/api/analytics/overview');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const stats = data.stats;
+                    document.getElementById('overall-stats').innerHTML = `
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 600; color: var(--accent-color);">${stats.total_trades}</div>
+                                <div style="color: var(--text-secondary); font-size: 0.9rem;">Total Trades</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 600; color: ${stats.win_rate >= 55 ? 'var(--success-color)' : 'var(--error-color)'};">${stats.win_rate.toFixed(1)}%</div>
+                                <div style="color: var(--text-secondary); font-size: 0.9rem;">Win Rate</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 600; color: ${stats.total_pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)'};">$${stats.total_pnl.toFixed(2)}</div>
+                                <div style="color: var(--text-secondary); font-size: 0.9rem;">Total P&L</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 600; color: ${stats.avg_pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)'};">${stats.avg_pnl.toFixed(2)}%</div>
+                                <div style="color: var(--text-secondary); font-size: 0.9rem;">Avg P&L</div>
+                            </div>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                document.getElementById('overall-stats').innerHTML = '<div class="empty-state"><h3>Error loading stats</h3></div>';
+            }
+        }
+
+        // Load top pairs
+        async function loadTopPairs() {
+            try {
+                const response = await fetch('/api/analytics/top-pairs');
+                const data = await response.json();
+                
+                if (data.success && data.pairs.length > 0) {
+                    document.getElementById('top-pairs').innerHTML = data.pairs.map(pair => `
+                        <li class="insight-item">
+                            <div class="symbol">${pair.symbol}</div>
+                            <div class="metric positive">
+                                ${pair.trades} trades | ${pair.avg_pnl.toFixed(2)}% avg | ${pair.win_rate.toFixed(1)}% win rate
+                            </div>
+                        </li>
+                    `).join('');
+                } else {
+                    document.getElementById('top-pairs').innerHTML = '<div class="empty-state"><h3>No data yet</h3><p>Trade more to see insights</p></div>';
+                }
+            } catch (error) {
+                console.error('Error loading top pairs:', error);
+            }
+        }
+
+        // Load and render charts
+        async function loadDailyPnlChart() {
+            try {
+                const response = await fetch('/api/analytics/daily-pnl');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const ctx = document.getElementById('daily-pnl-chart').getContext('2d');
+                    charts.dailyPnl = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: data.dates,
+                            datasets: [{
+                                label: 'Daily P&L ($)',
+                                data: data.pnl,
+                                borderColor: '#00ff88',
+                                backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                                tension: 0.4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                y: {
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading daily P&L:', error);
+            }
+        }
+
+        async function loadConfidenceChart() {
+            try {
+                const response = await fetch('/api/analytics/confidence');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const ctx = document.getElementById('confidence-chart').getContext('2d');
+                    charts.confidence = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: data.ranges,
+                            datasets: [{
+                                label: 'Win Rate (%)',
+                                data: data.win_rates,
+                                backgroundColor: '#00ff88'
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    max: 100,
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading confidence chart:', error);
+            }
+        }
+
+        // Load symbols data
+        async function loadSymbolsData() {
+            try {
+                const response = await fetch('/api/analytics/by-symbol');
+                const data = await response.json();
+                
+                if (data.success && data.symbols.length > 0) {
+                    const ctx = document.getElementById('symbols-chart').getContext('2d');
+                    charts.symbols = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: data.symbols.map(s => s.symbol),
+                            datasets: [{
+                                label: 'Total P&L ($)',
+                                data: data.symbols.map(s => s.total_pnl),
+                                backgroundColor: data.symbols.map(s => s.total_pnl >= 0 ? '#00ff88' : '#ff4444'),
+                                borderRadius: 4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: {
+                                    callbacks: {
+                                        afterLabel: function(context) {
+                                            const idx = context.dataIndex;
+                                            const sym = data.symbols[idx];
+                                            return [
+                                                `Trades: ${sym.trades}`,
+                                                `Avg P&L: ${sym.avg_pnl_pct}%`,
+                                                `Win Rate: ${sym.win_rate}%`,
+                                                `Avg Confidence: ${sym.avg_confidence}%`
+                                            ];
+                                        }
+                                    }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading symbols data:', error);
+            }
+        }
+
+        // Load time data
+        async function loadTimeData() {
+            try {
+                const response = await fetch('/api/analytics/by-time');
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Hour chart
+                    if (data.by_hour.length > 0) {
+                        const hourCtx = document.getElementById('hour-chart').getContext('2d');
+                        charts.hour = new Chart(hourCtx, {
+                            type: 'line',
+                            data: {
+                                labels: data.by_hour.map(h => `${h.hour}:00`),
+                                datasets: [{
+                                    label: 'Avg P&L %',
+                                    data: data.by_hour.map(h => h.avg_pnl_pct),
+                                    borderColor: '#00ff88',
+                                    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                                    tension: 0.4,
+                                    fill: true
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: { legend: { display: false } },
+                                scales: {
+                                    y: {
+                                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                        ticks: { color: '#a0a0a0' }
+                                    },
+                                    x: {
+                                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                        ticks: { color: '#a0a0a0' }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    
+                    // Day chart
+                    if (data.by_day.length > 0) {
+                        const dayCtx = document.getElementById('day-chart').getContext('2d');
+                        charts.day = new Chart(dayCtx, {
+                            type: 'bar',
+                            data: {
+                                labels: data.by_day.map(d => d.day_name),
+                                datasets: [{
+                                    label: 'Win Rate %',
+                                    data: data.by_day.map(d => d.win_rate),
+                                    backgroundColor: '#6366f1',
+                                    borderRadius: 4
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: { legend: { display: false } },
+                                scales: {
+                                    y: {
+                                        beginAtZero: true,
+                                        max: 100,
+                                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                        ticks: { color: '#a0a0a0' }
+                                    },
+                                    x: {
+                                        grid: { display: false },
+                                        ticks: { color: '#a0a0a0' }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading time data:', error);
+            }
+        }
+
+        // Load confidence data
+        async function loadConfidenceData() {
+            try {
+                // Win rate by confidence
+                const winRateResponse = await fetch('/api/analytics/confidence');
+                const winRateData = await winRateResponse.json();
+                
+                if (winRateData.success) {
+                    const ctx = document.getElementById('confidence-win-rate-chart').getContext('2d');
+                    charts.confidenceWinRate = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: winRateData.ranges,
+                            datasets: [{
+                                label: 'Win Rate (%)',
+                                data: winRateData.win_rates,
+                                backgroundColor: '#00ff88',
+                                borderRadius: 4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    max: 100,
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+                
+                // P&L by confidence
+                const pnlResponse = await fetch('/api/analytics/confidence-pnl');
+                const pnlData = await pnlResponse.json();
+                
+                if (pnlData.success) {
+                    const ctx = document.getElementById('confidence-pnl-chart').getContext('2d');
+                    charts.confidencePnl = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: pnlData.data.map(d => d.conf_range),
+                            datasets: [{
+                                label: 'Avg P&L %',
+                                data: pnlData.data.map(d => d.avg_pnl_pct),
+                                borderColor: '#6366f1',
+                                backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                                tension: 0.4,
+                                fill: true
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: {
+                                y: {
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading confidence data:', error);
+            }
+        }
+
+        // Load regime data
+        async function loadRegimeData() {
+            try {
+                const response = await fetch('/api/analytics/hold-duration');
+                const data = await response.json();
+                
+                if (data.success && data.data.length > 0) {
+                    // Duration chart
+                    const durationCtx = document.getElementById('duration-chart').getContext('2d');
+                    charts.duration = new Chart(durationCtx, {
+                        type: 'bar',
+                        data: {
+                            labels: data.data.map(d => d.duration_range),
+                            datasets: [
+                                {
+                                    label: 'Avg P&L %',
+                                    data: data.data.map(d => d.avg_pnl_pct),
+                                    backgroundColor: '#00ff88',
+                                    borderRadius: 4
+                                },
+                                {
+                                    label: 'Win Rate %',
+                                    data: data.data.map(d => d.win_rate),
+                                    backgroundColor: '#6366f1',
+                                    borderRadius: 4
+                                }
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: {
+                                    display: true,
+                                    labels: { color: '#a0a0a0' }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                    ticks: { color: '#a0a0a0' }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                    
+                    // Placeholder for regime chart (can be expanded later)
+                    const regimeCtx = document.getElementById('regime-chart').getContext('2d');
+                    charts.regime = new Chart(regimeCtx, {
+                        type: 'doughnut',
+                        data: {
+                            labels: data.data.map(d => d.duration_range),
+                            datasets: [{
+                                label: 'Trade Distribution',
+                                data: data.data.map(d => d.trades),
+                                backgroundColor: [
+                                    '#00ff88',
+                                    '#6366f1',
+                                    '#8b5cf6',
+                                    '#ec4899',
+                                    '#f59e0b'
+                                ]
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: {
+                                    display: true,
+                                    position: 'bottom',
+                                    labels: { color: '#a0a0a0' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading regime data:', error);
+            }
+        }
+
+        // Load on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadOverallStats();
+            loadTopPairs();
+            loadDailyPnlChart();
+            loadConfidenceChart();
+        });
+    </script>
+</body>
+</html>

@@ -1,5 +1,14 @@
 // Trading Bot Dashboard JavaScript
 
+// Global state management
+const AppState = {
+    theme: localStorage.getItem('theme') || 'dark',
+    refreshIntervals: new Map(),
+    cache: new Map(),
+    notifications: [],
+    loadingStates: new Set()
+};
+
 // Initialize Socket.IO connection
 const socket = io();
 
@@ -11,12 +20,138 @@ socket.on('connect', () => {
     loadModels();
     loadLogs();
     loadPerformanceChart();
+    initializeTheme();
 });
 
 socket.on('disconnect', () => {
     console.log('Disconnected from server');
     updateConnectionBadge(false);
 });
+
+// Initialize theme on page load
+function initializeTheme() {
+    document.documentElement.setAttribute('data-theme', AppState.theme);
+    updateThemeToggle();
+}
+
+// Theme toggle functionality
+function toggleTheme() {
+    AppState.theme = AppState.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', AppState.theme);
+    localStorage.setItem('theme', AppState.theme);
+    updateThemeToggle();
+}
+
+function updateThemeToggle() {
+    const toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+        const icon = toggle.querySelector('svg');
+        if (AppState.theme === 'dark') {
+            icon.innerHTML = '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>';
+        } else {
+            icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        }
+    }
+}
+
+// Enhanced notification system
+function showNotification(message, type = 'info', duration = 5000) {
+    const notificationId = Date.now();
+    const notification = {
+        id: notificationId,
+        message,
+        type,
+        timestamp: new Date()
+    };
+
+    AppState.notifications.push(notification);
+
+    // Create notification element
+    const notificationEl = document.createElement('div');
+    notificationEl.className = `notification ${type}`;
+    notificationEl.setAttribute('role', 'alert');
+    notificationEl.innerHTML = `
+        <div class="notification-icon">
+            ${type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️'}
+        </div>
+        <div class="notification-content">${message}</div>
+        <button class="notification-close" onclick="dismissNotification(${notificationId})" aria-label="Close notification">
+            ×
+        </button>
+    `;
+
+    const container = document.getElementById('notifications');
+    if (container) {
+        container.appendChild(notificationEl);
+
+        // Auto-dismiss after duration
+        if (duration > 0) {
+            setTimeout(() => dismissNotification(notificationId), duration);
+        }
+    }
+
+    return notificationId;
+}
+
+function dismissNotification(id) {
+    AppState.notifications = AppState.notifications.filter(n => n.id !== id);
+    const notificationEl = document.querySelector(`[onclick="dismissNotification(${id})"]`);
+    if (notificationEl) {
+        notificationEl.parentElement.remove();
+    }
+}
+
+// Loading state management
+function setLoadingState(elementId, loading) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+
+    if (loading) {
+        AppState.loadingStates.add(elementId);
+        element.classList.add('loading');
+    } else {
+        AppState.loadingStates.delete(elementId);
+        element.classList.remove('loading');
+    }
+}
+
+// Debounced API calls
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Cached API calls
+async function cachedFetch(url, options = {}, cacheTime = 30000) {
+    const cacheKey = `${url}-${JSON.stringify(options)}`;
+    const cached = AppState.cache.get(cacheKey);
+
+    if (cached && (Date.now() - cached.timestamp) < cacheTime) {
+        return cached.data;
+    }
+
+    try {
+        const response = await fetch(url, options);
+        const data = await response.json();
+
+        AppState.cache.set(cacheKey, {
+            data,
+            timestamp: Date.now()
+        });
+
+        return data;
+    } catch (error) {
+        console.error('API call failed:', error);
+        throw error;
+    }
+}
 
 // Bot status updates
 socket.on('bot_status', (data) => {
@@ -496,6 +631,7 @@ function switchTab(tabName) {
         'overview': 'Portfolio Overview',
         'scanner': 'Market Scanner',
         'positions': 'Active Positions',
+        'analytics': 'Performance Analytics',
         'training': 'ML Model Training',
         'logs': 'System Logs',
         'settings': 'Bot Settings'
@@ -637,18 +773,26 @@ function clearLogs() {
     }
 }
 
-// Load live positions
-function loadPositions() {
-    fetch('/api/positions')
-        .then(response => response.json())
-        .then(data => {
-            if (data.success && data.positions) {
-                displayPositions(data.positions);
-                updateLiveStats(data);
-            }
-        })
-        .catch(error => console.error('Error loading positions:', error));
-}
+// Load live positions with enhanced features
+const loadPositions = debounce(async function() {
+    try {
+        setLoadingState('positions-loading', true);
+
+        const data = await cachedFetch('/api/positions', {}, 5000); // Cache for 5 seconds
+
+        if (data.success && data.positions) {
+            displayPositions(data.positions);
+            updateLiveStats(data);
+        } else {
+            showError('Positions Error', data.message || 'Failed to load positions');
+        }
+    } catch (error) {
+        console.error('Error loading positions:', error);
+        showError('Positions Error', 'Unable to load positions. Please try again.');
+    } finally {
+        setLoadingState('positions-loading', false);
+    }
+}, 1000);
 
 function displayPositions(positions) {
     const container = document.getElementById('positions-table');
@@ -665,24 +809,40 @@ function displayPositions(positions) {
                     <th>Pair</th>
                     <th>Entry Price</th>
                     <th>Current Price</th>
+                    <th>Peak</th>
+                    <th>Trail Stop</th>
                     <th>Size</th>
                     <th>P&L</th>
                     <th>Confidence</th>
                     <th>Duration</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody>
                 ${positions.map(pos => {
                     const pnlClass = pos.pnl >= 0 ? 'change-positive' : 'change-negative';
+                    const peakPrice = pos.peak_price ? `$${pos.peak_price.toFixed(2)}` : '<span style="color: var(--text-secondary);">-</span>';
+                    const trailingStop = pos.trailing_stop ? `$${pos.trailing_stop.toFixed(2)}` : '<span style="color: var(--text-secondary);">-</span>';
+                    
                     return `
                         <tr>
                             <td style="font-weight: 600;">${pos.symbol}</td>
                             <td style="font-family: monospace;">$${pos.entry_price.toFixed(2)}</td>
                             <td style="font-family: monospace;">$${pos.current_price.toFixed(2)}</td>
+                            <td style="font-family: monospace; color: #10b981;">${peakPrice}</td>
+                            <td style="font-family: monospace; color: #f59e0b;">${trailingStop}</td>
                             <td>$${pos.size.toFixed(0)}</td>
                             <td class="${pnlClass}" style="font-weight: 600;">${pos.pnl > 0 ? '+' : ''}$${pos.pnl.toFixed(2)} (${pos.pnl_pct > 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%)</td>
                             <td>${pos.ml_confidence > 0 ? (pos.ml_confidence * 100).toFixed(0) + '%' : '<span style="color: var(--text-secondary); font-size: 11px;">Loaded</span>'}</td>
                             <td>${pos.duration}</td>
+                            <td>
+                                <button class="btn btn-danger btn-sm" onclick="sellPosition('${pos.symbol}', ${pos.current_price})" title="Close position at market price">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                    </svg>
+                                    Sell
+                                </button>
+                            </td>
                         </tr>
                     `;
                 }).join('')}
@@ -712,16 +872,148 @@ function updateLiveStats(data) {
     document.getElementById('live-pnl-pct').textContent = `${data.total_pnl_pct || 0}%`;
 }
 
-// Load recent trades
-function loadRecentTrades() {
-    fetch('/api/trades?limit=20')
-        .then(response => response.json())
-        .then(data => {
-            if (data.success && data.trades) {
-                displayRecentTrades(data.trades);
+// Load recent trades with search and export
+const loadRecentTrades = debounce(async function() {
+    try {
+        setLoadingState('trades-loading', true);
+
+        const data = await cachedFetch('/api/trades?limit=50', {}, 10000); // Cache for 10 seconds
+
+        if (data.success && data.trades) {
+            displayRecentTrades(data.trades);
+        } else {
+            showError('Trades Error', data.message || 'Failed to load trades');
+        }
+    } catch (error) {
+        console.error('Error loading trades:', error);
+        showError('Trades Error', 'Unable to load recent trades. Please try again.');
+    } finally {
+        setLoadingState('trades-loading', false);
+    }
+}, 1000);
+
+// Filter trades based on search input
+function filterTrades() {
+    const searchTerm = document.getElementById('trades-search').value.toLowerCase();
+    const rows = document.querySelectorAll('#recent-trades table tbody tr');
+
+    rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(searchTerm) ? '' : 'none';
+    });
+}
+
+// Manual position sell function
+async function sellPosition(symbol, currentPrice) {
+    // Confirm with user
+    const confirmed = confirm(
+        `Sell ${symbol} at market price (~$${currentPrice.toFixed(2)})?\n\n` +
+        `This will:\n` +
+        `• Execute a market sell order\n` +
+        `• Close the position immediately\n` +
+        `• Record the trade in history\n\n` +
+        `Are you sure?`
+    );
+    
+    if (!confirmed) {
+        return;
+    }
+    
+    try {
+        showNotification(`Selling ${symbol}...`, 'info', 2000);
+        
+        const response = await fetch('/api/sell_position', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ symbol: symbol })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showNotification(
+                `✅ ${symbol} sold successfully at $${data.price.toFixed(2)}! P&L: ${data.pnl > 0 ? '+' : ''}$${data.pnl.toFixed(2)}`,
+                'success',
+                5000
+            );
+            
+            // Refresh positions to remove the closed position
+            setTimeout(() => {
+                loadPositions();
+                loadRecentTrades();
+            }, 1000);
+        } else {
+            showNotification(`❌ Failed to sell ${symbol}: ${data.message}`, 'error', 7000);
+        }
+    } catch (error) {
+        console.error('Error selling position:', error);
+        showNotification(`❌ Error selling ${symbol}: ${error.message}`, 'error', 7000);
+    }
+}
+
+// Export functions
+async function exportPositions() {
+    try {
+        const data = await cachedFetch('/api/positions');
+        if (data.success && data.positions) {
+            const csv = convertToCSV(data.positions, ['symbol', 'entry_price', 'current_price', 'size', 'pnl', 'pnl_pct', 'duration']);
+            downloadCSV(csv, 'positions.csv');
+            showNotification('Positions exported successfully', 'success');
+        }
+    } catch (error) {
+        showNotification('Failed to export positions', 'error');
+    }
+}
+
+async function exportTrades() {
+    try {
+        const data = await cachedFetch('/api/trades?limit=1000');
+        if (data.success && data.trades) {
+            const csv = convertToCSV(data.trades, ['timestamp', 'symbol', 'action', 'price', 'size', 'pnl', 'pnl_pct', 'confidence']);
+            downloadCSV(csv, 'trades.csv');
+            showNotification('Trades exported successfully', 'success');
+        }
+    } catch (error) {
+        showNotification('Failed to export trades', 'error');
+    }
+}
+
+// CSV conversion utility
+function convertToCSV(data, headers) {
+    const csvRows = [];
+
+    // Add headers
+    csvRows.push(headers.join(','));
+
+    // Add data rows
+    data.forEach(row => {
+        const values = headers.map(header => {
+            const value = row[header];
+            // Escape commas and quotes in CSV
+            if (typeof value === 'string' && (value.includes(',') || value.includes('"'))) {
+                return `"${value.replace(/"/g, '""')}"`;
             }
-        })
-        .catch(error => console.error('Error loading trades:', error));
+            return value || '';
+        });
+        csvRows.push(values.join(','));
+    });
+
+    return csvRows.join('\n');
+}
+
+// Download CSV utility
+function downloadCSV(csv, filename) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 }
 
 function displayRecentTrades(trades) {
@@ -815,17 +1107,32 @@ function stopPositionsRefresh() {
     }
 }
 
-// Initial load
+// Theme toggle event listener
+document.addEventListener('DOMContentLoaded', () => {
+    const themeToggle = document.getElementById('theme-toggle');
+    if (themeToggle) {
+        themeToggle.addEventListener('click', toggleTheme);
+    }
+});
+
+// Initial load with enhanced setup
 document.addEventListener('DOMContentLoaded', () => {
     // Setup nav item click handlers
     document.querySelectorAll('.nav-item').forEach(item => {
         item.addEventListener('click', (e) => {
+            // Check if this is an external link (has real href, not just #)
+            const href = item.getAttribute('href');
+            if (href && href !== '#') {
+                // Allow normal navigation for external links
+                return;
+            }
+
             e.preventDefault();
-            
+
             // Update active nav item
             document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
             item.classList.add('active');
-            
+
             // Switch to the corresponding tab
             const tabName = item.getAttribute('data-tab');
             if (tabName) {
@@ -833,25 +1140,65 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     });
-    
+
+    // Setup keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        // Ctrl/Cmd + K: Focus search
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+            e.preventDefault();
+            const searchInput = document.getElementById('trades-search');
+            if (searchInput) {
+                searchInput.focus();
+            }
+        }
+
+        // Escape: Clear search
+        if (e.key === 'Escape') {
+            const searchInput = document.getElementById('trades-search');
+            if (searchInput && document.activeElement === searchInput) {
+                searchInput.value = '';
+                filterTrades();
+            }
+        }
+    });
+
     // Load initial data
     refreshStatus();
     loadModels();
     loadLogs();
-    
-    // Check which tab is active on load
-    const activeTab = document.querySelector('.nav-item.active');
-    if (activeTab) {
-        const tabName = activeTab.getAttribute('data-tab');
-        if (tabName === 'positions') {
-            startPositionsRefresh();
-        } else if (tabName === 'overview') {
-            startPortfolioRefresh();
+
+    // Check for URL parameter to switch tab
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabParam = urlParams.get('tab');
+
+    if (tabParam) {
+        // Find and activate the nav item for this tab
+        const navItem = document.querySelector(`[data-tab="${tabParam}"]`);
+        if (navItem) {
+            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+            navItem.classList.add('active');
+            switchTab(tabParam);
         }
     } else {
-        // Default to overview if no active tab
-        startPortfolioRefresh();
+        // Check which tab is active on load
+        const activeTab = document.querySelector('.nav-item.active');
+        if (activeTab) {
+            const tabName = activeTab.getAttribute('data-tab');
+            if (tabName === 'positions') {
+                startPositionsRefresh();
+            } else if (tabName === 'overview') {
+                startPortfolioRefresh();
+            }
+        } else {
+            // Default to overview if no active tab
+            startPortfolioRefresh();
+        }
     }
+
+    // Show welcome notification
+    setTimeout(() => {
+        showNotification('Dashboard loaded successfully! Use Ctrl+K to search trades.', 'success', 3000);
+    }, 1000);
 });
 
 // Load logs
@@ -942,8 +1289,8 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 
-// Auto-refresh logs every 10 seconds
-setInterval(loadLogs, 10000);
+// Auto-refresh logs every 30 seconds (reduced frequency)
+setInterval(loadLogs, 30000);
 
 // ===== Bot Activity Monitor =====
 
@@ -1111,57 +1458,80 @@ setInterval(() => {
     }
 }, 10000);
 
-// Load portfolio data
-async function loadPortfolio() {
+// Load portfolio data with enhanced error handling
+const loadPortfolio = debounce(async function() {
+    const elementIds = ['total-balance', 'active-positions', 'total-pnl', 'win-rate'];
+
     try {
-        const response = await fetch('/api/portfolio');
-        const data = await response.json();
-        
+        // Set loading states
+        elementIds.forEach(id => setLoadingState(id, true));
+
+        const data = await cachedFetch('/api/portfolio', {}, 10000); // Cache for 10 seconds
+
         if (data.success) {
+            // Clear any previous errors
+            document.getElementById('dashboard-errors').style.display = 'none';
+
             // Update balance
             document.getElementById('total-balance').textContent = `$${data.balance.total.toFixed(2)}`;
-            
+            document.getElementById('balance-change').textContent = `${data.balance.free.toFixed(2)} free / ${data.balance.locked.toFixed(2)} locked`;
+
             // Update positions count
             const posCount = data.positions.count;
             const maxPos = 5; // TODO: Get from config
             document.getElementById('active-positions').textContent = posCount;
-            const posChange = document.querySelector('#active-positions').nextElementSibling;
-            if (posChange) {
-                posChange.textContent = `${posCount} / ${maxPos} max`;
-            }
-            
+            document.getElementById('positions-limit').textContent = `${posCount} / ${maxPos} max`;
+
             // Update total P&L
             const totalPnl = data.positions.total_pnl || 0;
             const pnlElement = document.getElementById('total-pnl');
             pnlElement.textContent = `$${totalPnl.toFixed(2)}`;
-            const pnlChange = pnlElement.nextElementSibling;
+            const pnlChange = document.getElementById('pnl-change');
             if (pnlChange) {
                 const pnlPct = data.positions.avg_pnl_pct || 0;
                 pnlChange.className = pnlPct >= 0 ? 'stat-change positive' : 'stat-change negative';
-                pnlChange.innerHTML = `${pnlPct >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>'} ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+                pnlChange.textContent = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
             }
-            
+
             // Update win rate
             const winRate = data.performance?.win_rate || 0;
             const totalTrades = data.performance?.total_trades || 0;
             document.getElementById('win-rate').textContent = `${winRate.toFixed(0)}%`;
-            const winRateChange = document.getElementById('win-rate').nextElementSibling;
-            if (winRateChange) {
-                winRateChange.textContent = `${totalTrades} trades`;
-            }
+            document.getElementById('trade-count').textContent = `${totalTrades} trades`;
+
+        } else {
+            showError('Failed to load portfolio data', data.message);
         }
     } catch (error) {
         console.error('Failed to load portfolio:', error);
+        showError('Portfolio Error', 'Unable to load portfolio data. Please check your connection.');
+    } finally {
+        // Clear loading states
+        elementIds.forEach(id => setLoadingState(id, false));
+    }
+}, 1000);
+
+// Enhanced error display
+function showError(title, message) {
+    const errorContainer = document.getElementById('dashboard-errors');
+    if (errorContainer) {
+        errorContainer.innerHTML = `
+            <div class="error-message">
+                <div class="error-title">${title}</div>
+                <div class="error-details">${message}</div>
+            </div>
+        `;
+        errorContainer.style.display = 'block';
     }
 }
 
-// Auto-refresh portfolio every 5 seconds when on Overview page
+// Auto-refresh portfolio every 10 seconds when on Overview page (reduced frequency)
 let portfolioRefreshInterval = null;
 
 function startPortfolioRefresh() {
     loadPortfolio();
     if (!portfolioRefreshInterval) {
-        portfolioRefreshInterval = setInterval(loadPortfolio, 5000);
+        portfolioRefreshInterval = setInterval(loadPortfolio, 10000); // Increased to 10s
     }
 }
 
@@ -1171,6 +1541,22 @@ function stopPortfolioRefresh() {
         portfolioRefreshInterval = null;
     }
 }
+
+// Memory cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    // Clear all intervals
+    stopPortfolioRefresh();
+    stopPositionsRefresh();
+
+    // Clear all caches
+    AppState.cache.clear();
+    AppState.notifications.length = 0;
+    AppState.loadingStates.clear();
+
+    // Clear any remaining timeouts
+    AppState.refreshIntervals.forEach(interval => clearInterval(interval));
+    AppState.refreshIntervals.clear();
+});
 
 // Load settings from server
 async function loadSettings() {

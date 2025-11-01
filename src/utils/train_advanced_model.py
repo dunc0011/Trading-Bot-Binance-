@@ -23,6 +23,7 @@ from config.config import Config
 from utils.advanced_features import AdvancedFeatureEngine
 from utils.triple_barrier import TripleBarrierLabeler, optimize_holding_period
 from utils.advanced_ml_trainer import AdvancedMLTrainer
+from utils.market_aware_features import add_market_aware_features
 
 
 def setup_logging(level='INFO'):
@@ -168,11 +169,20 @@ def main():
     logger.info("STEP 2: Building Advanced Features")
     logger.info("=" * 80)
     
+    # Add market-aware contextual features
+    logger.info("Adding market-aware features (multi-timeframe, volume, regime)...")
+    try:
+        df = add_market_aware_features(df.reset_index(), client, args.symbol, args.interval)
+        df = df.set_index('timestamp')
+        logger.info(f"Market-aware features added: multi-timeframe alignment, volume microstructure, regime detection")
+    except Exception as e:
+        logger.warning(f"Could not add market-aware features: {e}")
+    
     feature_engine = AdvancedFeatureEngine()
     
     try:
         features = feature_engine.build_features(df)
-        logger.info(f"Created {len(features.columns)} features: {list(features.columns)}")
+        logger.info(f"Created {len(features.columns)} features (base + market-aware): {list(features.columns[:20])}... and {len(features.columns)-20} more")
     except Exception as e:
         logger.error(f"Feature engineering failed: {e}", exc_info=True)
         return 1

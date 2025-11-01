@@ -38,11 +38,11 @@ class AutoTrainer:
         )
         
         # Auto-training settings
-        self.min_volume_usdt = 10_000_000  # Minimum 24h volume (10M USDT)
-        self.max_pairs = 20  # Train top 20 pairs
+        self.min_volume_usdt = 1_000_000  # Minimum 24h volume (1M USDT - wider coverage)
+        self.max_pairs = 200  # Train top 200 pairs (all liquid pairs)
         self.retrain_interval_days = 7  # Retrain weekly
-        self.lookback_days = 180  # More data for 15m models
-        self.timeframe = '15m'  # 15-minute candles for faster trades
+        self.lookback_days = 90  # 90 days of data
+        self.timeframe = '15m'  # 15-minute candles
         
         # Track trained models
         self.trained_pairs = {}
@@ -180,13 +180,12 @@ class AutoTrainer:
         logger.info(f"Training model for {symbol} ({self.timeframe}, {self.lookback_days} days)")
         
         try:
-            # Run training script as subprocess
+            # Run training script as subprocess (mean reversion model)
             cmd = [
-                'python', '-m', 'src.utils.train_ml_model',
+                sys.executable, '-m', 'src.utils.train_mean_reversion',
                 '--symbol', symbol,
                 '--interval', self.timeframe,
-                '--lookback-days', str(self.lookback_days),
-                '--model-dir', 'models/ml_ema'
+                '--lookback-days', str(self.lookback_days)
             ]
             
             result = subprocess.run(
@@ -198,7 +197,7 @@ class AutoTrainer:
             
             if result.returncode == 0:
                 # Training succeeded - check metadata
-                meta_file = Path(f'models/ml_ema/{symbol}_{self.timeframe}_ml_ema.meta.json')
+                meta_file = Path(f'models/mean_reversion/{symbol}_{self.timeframe}_mean_reversion.meta.json')
                 if meta_file.exists():
                     with open(meta_file, 'r') as f:
                         meta = json.load(f)

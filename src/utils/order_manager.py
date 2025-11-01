@@ -250,6 +250,26 @@ class OrderManager:
                         return None
                 else:
                     raise ValueError(f"Invalid side: {side}. Must be 'BUY' or 'SELL'")
+            else:
+                # Quantity explicitly provided - MUST round to step size AND check actual balance
+                filters_enhanced = self._get_enhanced_symbol_filters(symbol)
+                quantity = self._floor_to_step(quantity, filters_enhanced['step_size'])
+                if quantity <= 0:
+                    self.logger.warning(f"Quantity rounded to 0 for {symbol} (step size: {filters_enhanced['step_size']})")
+                    return None
+                
+                # For SELL orders, verify we actually have enough free balance
+                if side == 'SELL':
+                    actual_free = self._get_free_base_asset(symbol)
+                    if actual_free <= 0:
+                        self.logger.warning(f"No free balance for {symbol} - cannot sell")
+                        return None
+                    if quantity > actual_free:
+                        self.logger.warning(
+                            f"Requested qty {quantity:.8f} exceeds free balance {actual_free:.8f} for {symbol}. "
+                            f"Selling available balance instead."
+                        )
+                        quantity = actual_free
             
             # Get symbol filters (using legacy method for remaining logic)
             filters = self._get_symbol_filters(symbol)
@@ -264,34 +284,53 @@ class OrderManager:
                 )
                 return None
             
-            # Get current bid/ask for smart limit orders
+            # Get current bid/ask and spread for order type decision
             prices = self._get_ticker_price(symbol)
+            spread = prices['ask'] - prices['bid']
+            spread_bps = (spread / prices['mid']) * 10000  # basis points
             
-            # Determine order type and price
-            if self.use_limit_orders and side == 'BUY':
-                # For BUY: place limit at bid (or slightly above) to avoid paying spread
-                limit_price = prices['bid'] + (prices['ask'] - prices['bid']) * 0.3  # 30% into spread
-                if 'lot_size' in filters and 'tickSize' in str(filters):
-                    # Get tick size from PRICE_FILTER
-                    tick_size = 0.01  # Default
-                    try:
-                        info = self.client.get_symbol_info(symbol)
-                        for f in info['filters']:
-                            if f['filterType'] == 'PRICE_FILTER':
-                                tick_size = float(f['tickSize'])
-                                break
-                    except:
-                        pass
-                    limit_price = self._round_price(limit_price, tick_size)
+            # Get tick size for price rounding
+            tick_size = 0.01
+            try:
+                info = self.client.get_symbol_info(symbol)
+                for f in info['filters']:
+                    if f['filterType'] == 'PRICE_FILTER':
+                        tick_size = float(f['tickSize'])
+                        break
+            except:
+                pass
+            
+            # MARKET-FIRST STRATEGY: Use market orders for instant execution
+            # Limit orders can miss fills and create unfilled orders
+            
+            # Always use market orders for instant fills (sacrifice 0.035% fee savings for reliability)
+            use_maker = False  # Disabled: market orders only
+            
+            if use_maker:
+                # POST-ONLY LIMIT ORDER (maker fees)
+                if side == 'BUY':
+                    # Place limit at best bid (maker side)
+                    limit_price = self._round_price(prices['bid'], tick_size)
+                else:  # SELL
+                    # Place limit at best ask (maker side)
+                    limit_price = self._round_price(prices['ask'], tick_size)
                 
                 order_type = 'LIMIT'
                 order_price = limit_price
-                self.logger.info(f"🎯 Executing SMART LIMIT {side}: {quantity} {symbol} @ ${order_price:.4f} (bid: ${prices['bid']:.4f}, ask: ${prices['ask']:.4f})")
+                
+                self.logger.info(
+                    f"🎯 POST-ONLY MAKER {side}: {quantity:.8f} {symbol} @ ${order_price:.6f} "
+                    f"(bid: ${prices['bid']:.6f}, ask: ${prices['ask']:.6f}, spread: {spread_bps:.1f}bp)"
+                )
             else:
-                # For SELL or if limit disabled: use market
+                # MARKET ORDER (taker fees) - wide spread or urgent exit
                 order_type = 'MARKET'
                 order_price = current_price
-                self.logger.info(f"Executing {side} order: {quantity} {symbol} @ market (${current_price:.2f})")
+                
+                self.logger.warning(
+                    f"⚡ MARKET TAKER {side}: {quantity:.8f} {symbol} @ market "
+                    f"(spread {spread_bps:.1f}bp too wide for maker, using taker)"
+                )
             
             # Place order
             order_params = {
@@ -317,6 +356,54 @@ class OrderManager:
                 }
             
             order = self.client.create_order(**order_params)
+            
+            # Extract actual fees from fills
+            total_fee = 0.0
+            fee_asset = 'USDT'
+            if 'fills' in order:
+                self.logger.debug(f"📋 Processing {len(order['fills'])} fills for fee calculation")
+                for i, fill in enumerate(order['fills']):
+                    commission = float(fill.get('commission', 0))
+                    commission_asset = fill.get('commissionAsset', 'USDT')
+                    fill_price = float(fill.get('price', current_price))
+                    fill_qty = float(fill.get('qty', 0))
+                    
+                    self.logger.debug(
+                        f"  Fill {i+1}: qty={fill_qty:.8f}, price=${fill_price:.2f}, "
+                        f"commission={commission:.8f} {commission_asset}"
+                    )
+                    
+                    # Convert fee to USDT if needed
+                    if commission_asset == 'USDT':
+                        total_fee += commission
+                        fee_asset = 'USDT'
+                    else:
+                        # Fee taken in base asset (e.g., BTC, ETH, BNB)
+                        # Convert to USDT using fill price
+                        fee_usdt = commission * fill_price
+                        total_fee += fee_usdt
+                        fee_asset = commission_asset
+                        self.logger.debug(
+                            f"    → Converted {commission:.8f} {commission_asset} @ ${fill_price:.2f} = ${fee_usdt:.4f} USDT"
+                        )
+                
+                self.logger.info(f"💰 Total fee: ${total_fee:.4f} USDT (charged in {fee_asset})")
+                
+                # Sanity check: fees should never exceed 1% of notional value
+                notional_value = quantity * current_price
+                max_expected_fee = notional_value * 0.01  # 1% is absurdly high for Binance
+                if total_fee > max_expected_fee:
+                    self.logger.error(
+                        f"⚠️ ANOMALOUS FEE DETECTED: ${total_fee:.4f} on ${notional_value:.2f} position " 
+                        f"({total_fee/notional_value*100:.2f}%). Expected max ${max_expected_fee:.4f}. "
+                        f"This may indicate a fee calculation bug!"
+                    )
+                    # Log the raw fill data for debugging
+                    self.logger.error(f"Raw fills: {order.get('fills', [])}")
+            
+            # Add fee info to order response
+            order['total_fee_usdt'] = total_fee
+            order['fee_asset'] = fee_asset
             
             self.logger.info(f"✅ Order placed successfully: {order['orderId']}")
             self.active_orders[order['orderId']] = order

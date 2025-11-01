@@ -26,6 +26,7 @@ class AdvancedMLStrategy:
         self.logger = logging.getLogger(__name__)
         self.position = None
         self.model_monitor = model_monitor  # Optional model monitoring
+        self.last_exit_time = {}  # Track exit times to prevent churning
         
         # Feature engine
         self.feature_engine = AdvancedFeatureEngine()
@@ -57,13 +58,13 @@ class AdvancedMLStrategy:
     def _load_model(self):
         """Load trained model and metadata"""
         try:
-            # Load model
-            self.model = joblib.load(self.model_path)
+            # Load model (mmap_mode=None to avoid file locking deadlocks)
+            self.model = joblib.load(self.model_path, mmap_mode=None)
             self.logger.info(f"Loaded advanced model from {self.model_path}")
             
             # Load scaler
             if self.scaler_path.exists():
-                self.scaler = joblib.load(self.scaler_path)
+                self.scaler = joblib.load(self.scaler_path, mmap_mode=None)
             
             # Load metadata
             if self.meta_path.exists():
@@ -175,6 +176,17 @@ class AdvancedMLStrategy:
             min_confidence = getattr(self.config, 'ml_proba_threshold', 0.50)  # Lowered from 0.55
             
             if prediction == 1 and ml_confidence >= min_confidence and self.position != 'long':
+                # COOLDOWN: Prevent re-entry immediately after exit (stops churning)
+                from datetime import datetime, timedelta
+                symbol = getattr(self.config, 'symbol', 'UNKNOWN')
+                cooldown_minutes = 2  # 2 min cooldown after any exit (reduced from 15)
+                
+                if symbol in self.last_exit_time:
+                    time_since_exit = (datetime.now() - self.last_exit_time[symbol]).total_seconds() / 60
+                    if time_since_exit < cooldown_minutes:
+                        self.logger.debug(f"⏱️ Cooldown: {time_since_exit:.1f}m / {cooldown_minutes}m since exit")
+                        return None
+                
                 # Get market indicators
                 market_regime = latest_features.get('regime', pd.Series([1])).iloc[0]
                 hurst = latest_features.get('hurst', pd.Series([0.5])).iloc[0]
@@ -253,6 +265,10 @@ class AdvancedMLStrategy:
             
             # SELL signal
             elif prediction == 0 and self.position == 'long':
+                from datetime import datetime
+                symbol = getattr(self.config, 'symbol', 'UNKNOWN')
+                self.last_exit_time[symbol] = datetime.now()  # Track exit time
+                
                 result = {
                     'action': 'SELL',
                     'price': current_price,
@@ -263,7 +279,7 @@ class AdvancedMLStrategy:
                     }
                 }
                 self.position = None
-                self.logger.info(f"💰 Advanced ML SELL at {current_price:.2f}")
+                self.logger.info(f"💰 Advanced ML SELL at {current_price:.2f} [2m cooldown]")
             
             return result
         

@@ -22,6 +22,7 @@ class PositionState:
     base_qty: float
     remaining_qty: float
     highest_price: float
+    trailing_stop_price: float = 0.0  # Cached stop that only moves UP
     partial1_done: bool = False
     partial2_done: bool = False
     executing: bool = False
@@ -31,7 +32,8 @@ class PositionState:
     
     def __post_init__(self):
         # asyncio.Lock can't be pickled, so create it after init
-        self.lock = asyncio.Lock()
+        # Don't create lock here - will be created in async context
+        self.lock = None
 
 
 @dataclass
@@ -54,16 +56,19 @@ class RealtimePositionMonitor:
     - Thread-safe price cache and position state management
     """
     
-    def __init__(self, client, order_manager, config, logger=None):
+    def __init__(self, client, order_manager, config, logger=None, on_position_closed=None, telegram=None):
         self.client = client
         self.order_manager = order_manager
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.on_position_closed = on_position_closed  # Callback when position closed
+        self.telegram = telegram  # Telegram notifier for alerts
         
         # Position tracking (async-safe)
         self._positions: Dict[str, PositionState] = {}
-        self._positions_lock = asyncio.Lock()
+        # Don't create lock here - will be created in async context
+        self._positions_lock = None
         
         # Price cache (thread-safe for WS callback)
         self._price_cache: Dict[str, PriceTick] = {}
@@ -71,15 +76,17 @@ class RealtimePositionMonitor:
         
         # WebSocket manager
         self._twm: Optional[ThreadedWebsocketManager] = None
+        self._twm_init_lock = threading.Lock()
+        self._twm_started = threading.Event()
         self._socket_id: Optional[str] = None
         self._subscribed: Set[str] = set()
         self._ws_running = False
         self._ws_failure = False
         
-        # Event coordination
-        self._resubscribe_event = asyncio.Event()
-        self._price_event = asyncio.Event()
-        self._stop = asyncio.Event()
+        # Event coordination (create in async context)
+        self._resubscribe_event = None
+        self._price_event = None
+        self._stop = None
         
         # Tasks
         self._monitor_task: Optional[asyncio.Task] = None
@@ -96,6 +103,11 @@ class RealtimePositionMonitor:
     async def start(self):
         """Start the real-time monitor"""
         self.loop = asyncio.get_running_loop()
+        # Create locks and events in async context
+        self._positions_lock = asyncio.Lock()
+        self._resubscribe_event = asyncio.Event()
+        self._price_event = asyncio.Event()
+        self._stop = asyncio.Event()
         await self._start_ws()
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="rtm.monitor")
         self._ws_task = asyncio.create_task(self._ws_supervisor_loop(), name="rtm.ws_supervisor")
@@ -128,23 +140,47 @@ class RealtimePositionMonitor:
         
         self.logger.info("✅ RTM: Stopped")
     
-    async def register_position(self, symbol: str, entry_price: float, qty: float):
+    async def register_position(self, symbol: str, entry_price: float, qty: float, entry_fee_usdt: float = 0.0):
         """Register a new position for real-time monitoring"""
         async with self._positions_lock:
+            # Calculate effective entry price that accounts for fees
+            # We need to exit at a price that covers: entry fee + exit fee (estimated)
+            estimated_exit_fee = entry_fee_usdt  # Assume exit fee similar to entry
+            total_fees = entry_fee_usdt + estimated_exit_fee
+            fee_adjusted_entry = entry_price + (total_fees / qty)
+
             if symbol in self._positions and not self._positions[symbol].closed:
-                self.logger.debug(f"RTM: {symbol} already tracked")
+                # CRITICAL FIX: Update entry price and qty for re-entries
+                old_entry = self._positions[symbol].entry_price
+                if abs(old_entry - entry_price) > 0.01:  # Price changed significantly
+                    self.logger.warning(f"⚠️ RTM: {symbol} ENTRY PRICE UPDATED ${old_entry:.2f} → ${entry_price:.2f} (re-entry detected)")
+                    self._positions[symbol].entry_price = fee_adjusted_entry  # Use fee-adjusted
+                    self._positions[symbol].base_qty = qty
+                    self._positions[symbol].remaining_qty = qty
+                    self._positions[symbol].highest_price = fee_adjusted_entry  # Start from break-even
+                    self._positions[symbol].trailing_stop_price = 0.0  # Reset stop
+                    self._positions[symbol].opened_ts = time.time()
+                else:
+                    self.logger.debug(f"RTM: {symbol} already tracked at same price")
                 return
-            
+
             ps = PositionState(
                 symbol=symbol,
-                entry_price=entry_price,
+                entry_price=fee_adjusted_entry,  # Use fee-adjusted entry
                 base_qty=qty,
                 remaining_qty=qty,
-                highest_price=entry_price
+                highest_price=fee_adjusted_entry  # Start from break-even after fees
             )
+            # Create lock for this position
+            ps.lock = asyncio.Lock()
             self._positions[symbol] = ps
-            self.logger.info(f"📍 RTM: Tracking {symbol} | Entry: ${entry_price:.6f} | Qty: {qty:.8f}")
-        
+
+            fee_impact_pct = ((fee_adjusted_entry - entry_price) / entry_price) * 100
+            self.logger.info(
+                f"📍 RTM: Tracking {symbol} | Entry: ${entry_price:.2f} | "
+                f"Fee-adjusted break-even: ${fee_adjusted_entry:.2f} (+{fee_impact_pct:.2f}%) | Qty: {qty:.8f}"
+            )
+
         # Trigger WebSocket resubscription
         self._trigger_resubscribe()
     
@@ -159,26 +195,64 @@ class RealtimePositionMonitor:
         # Trigger WebSocket resubscription
         self._trigger_resubscribe()
     
+    async def get_position_data(self, symbol: str) -> Optional[Dict]:
+        """Get live peak and trailing stop for a position"""
+        async with self._positions_lock:
+            ps = self._positions.get(symbol)
+        
+        if not ps or ps.closed:
+            return None
+        
+        # Return cached trailing stop (only moves up, never recalculates down)
+        return {
+            'peak_price': ps.highest_price,
+            'trailing_stop': ps.trailing_stop_price if ps.trailing_stop_price > 0 else ps.entry_price * (1.0 - self.config.hard_stop_loss_pct)
+        }
+    
     def _trigger_resubscribe(self):
         """Signal WebSocket supervisor to resubscribe (thread-safe)"""
         if self.loop:
             self.loop.call_soon_threadsafe(self._resubscribe_event.set)
     
+    def _start_twm_sync(self, testnet: bool):
+        """Synchronous TWM initialization (runs in background thread)"""
+        try:
+            with self._twm_init_lock:
+                if self._twm is None:
+                    self._twm = ThreadedWebsocketManager(
+                        api_key=self.config.api_key,
+                        api_secret=self.config.api_secret,
+                        testnet=testnet
+                    )
+                    self._twm.start()
+                    self._twm_started.set()
+                    self.logger.info(f"📡 RTM: WebSocket manager started (testnet={testnet})")
+        except Exception as e:
+            self.logger.error(f"RTM: Failed to start WebSocket: {e}", exc_info=True)
+            self._ws_failure = True
+            self._twm_started.set()  # Unblock waiter even on failure
+    
     async def _start_ws(self):
-        """Initialize WebSocket manager"""
-        if self._twm is None:
+        """Initialize WebSocket manager asynchronously"""
+        if self._twm is None and not self._twm_started.is_set():
             testnet = self.config.trading_mode == "testnet"
-            try:
-                self._twm = ThreadedWebsocketManager(
-                    api_key=self.config.api_key,
-                    api_secret=self.config.api_secret,
-                    testnet=testnet
-                )
-                self._twm.start()
-                self.logger.info(f"📡 RTM: WebSocket manager started (testnet={testnet})")
-            except Exception as e:
-                self.logger.error(f"RTM: Failed to start WebSocket: {e}")
-                self._ws_failure = True
+            
+            # Start TWM in a dedicated background thread to avoid event loop conflicts
+            # (ThreadedWebsocketManager.start() uses asyncio.run() internally)
+            thread = threading.Thread(
+                target=self._start_twm_sync,
+                args=(testnet,),
+                daemon=True,
+                name="rtm-twm-init"
+            )
+            thread.start()
+            
+            # Wait for TWM to start (non-blocking)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._twm_started.wait, 5.0)  # 5s timeout
+            
+            if self._ws_failure or self._twm is None:
+                self.logger.warning("RTM: WebSocket initialization failed, using REST fallback only")
                 return
         
         await self._resubscribe()
@@ -339,22 +413,29 @@ class RealtimePositionMonitor:
                 
                 # Track highest price for trailing stop
                 if price > ps.highest_price:
+                    old_high = ps.highest_price
                     ps.highest_price = price
+                    gain_pct = ((price / ps.entry_price) - 1.0) * 100
+                    self.logger.info(f"🔼 {sym}: NEW HIGH ${price:.2f} (+{gain_pct:.2f}%) - was ${old_high:.2f}")
                 
                 # Apply exit logic
                 await self._apply_exit_logic(ps, price)
     
     async def _get_price(self, symbol: str, ps: PositionState, now: float) -> Optional[float]:
         """Get current price from WebSocket cache or REST fallback"""
-        # Try WebSocket cache first
-        with self._price_lock:
-            tick = self._price_cache.get(symbol)
+        # Try WebSocket cache first (only if WS is working)
+        if not self._ws_failure:
+            with self._price_lock:
+                tick = self._price_cache.get(symbol)
+            
+            if tick and (now - tick.ts < 5.0):  # Use WS data if fresh (< 5s old)
+                return tick.bid
         
-        if tick:
-            return tick.bid  # Use bid for sell orders
-        
-        # Fallback to REST if no recent WebSocket data
-        if now - ps.last_update_ts >= self.config.monitor_poll_fallback_interval:
+        # Always use REST fallback if:
+        # 1. WebSocket is broken
+        # 2. No recent WebSocket data
+        # 3. Been more than 1 second since last update
+        if self._ws_failure or now - ps.last_update_ts >= self.config.monitor_poll_fallback_interval:
             try:
                 # Use shorter timeout to prevent blocking
                 import asyncio
@@ -382,55 +463,29 @@ class RealtimePositionMonitor:
         return None
     
     async def _apply_exit_logic(self, ps: PositionState, price: float):
-        """Apply exit logic: stops, trailing, and profit targets"""
+        """Apply ONLY stop-loss below entry - let ML strategy handle exits above entry"""
         entry = ps.entry_price
         gain = (price / entry) - 1.0
-        highest_gain = (ps.highest_price / entry) - 1.0
         
-        # === 1) STOP LOSS LOGIC ===
-        hard_sl = entry * (1.0 - self.config.hard_stop_loss_pct)
-        early_sl = entry * (1.0 - self.config.trailing_before_0_2_sl)
-        floor_sl = max(hard_sl, early_sl)
+        # ONLY ONE RULE: 3% stop-loss below entry
+        # No trailing stops, no profit-taking - ML strategy decides when to sell
+        stop_loss_price = entry * 0.97  # 3% below entry
         
-        # Trailing stop based on highest achieved gains
-        trailing_sl = floor_sl
+        # Track peak for logging only (not for exit logic)
+        if price > ps.highest_price:
+            ps.highest_price = price
+            gain_pct = gain * 100
+            self.logger.info(f"🔼 {ps.symbol}: NEW HIGH ${price:.2f} (+{gain_pct:.2f}%)")
         
-        if highest_gain >= self.config.trailing_lock_1_min and highest_gain < self.config.trailing_lock_1_max:
-            # Lock 70% of gains between +0.15% and +0.30%
-            lock_pct = self.config.trailing_lock_1_keep
-            trailing_sl = max(trailing_sl, entry * (1.0 + highest_gain * lock_pct))
-        
-        elif highest_gain >= self.config.trailing_lock_1_max:
-            # Lock 80% of gains above +0.30%
-            lock_pct = self.config.trailing_lock_2_keep
-            trailing_sl = max(trailing_sl, entry * (1.0 + highest_gain * lock_pct))
-        
-        # Check stop loss first (protection)
-        if price <= trailing_sl:
-            await self._exit_all(ps, price, reason=f"SL @ ${price:.6f} (entry: ${entry:.6f})")
+        # ONLY exit if stop-loss hit
+        if price <= stop_loss_price:
+            await self._exit_all(
+                ps, 
+                price, 
+                reason=f"Stop-loss hit (3% below entry) | Loss: {gain*100:.2f}%"
+            )
             self._stats['sl_exits'] += 1
             return
-        
-        # === 2) PROFIT TARGETS ===
-        
-        # TP2: +0.30% - Close remaining position
-        if (not ps.partial2_done) and gain >= self.config.partial_exit_2_pct and ps.remaining_qty > 0:
-            qty = ps.remaining_qty
-            await self._exit_qty(ps, qty, price, reason=f"TP2 +{self.config.partial_exit_2_pct*100:.2f}%")
-            ps.partial1_done = True
-            ps.partial2_done = True
-            self._stats['tp2_exits'] += 1
-            return
-        
-        # TP1: +0.15% - Close 60%
-        if (not ps.partial1_done) and gain >= self.config.partial_exit_1_pct and ps.remaining_qty > 0:
-            qty = round(ps.base_qty * self.config.partial_exit_1_size, 8)
-            qty = min(qty, ps.remaining_qty)
-            
-            if qty > 0:
-                await self._exit_qty(ps, qty, price, reason=f"TP1 +{self.config.partial_exit_1_pct*100:.2f}%")
-                ps.partial1_done = True
-                self._stats['tp1_exits'] += 1
     
     async def _exit_all(self, ps: PositionState, mkt_price: float, reason: str):
         """Exit entire remaining position"""
@@ -463,15 +518,21 @@ class RealtimePositionMonitor:
                     # Single-pair bot: use shared order manager
                     order_mgr = self.order_manager
                 
-                await order_mgr.execute_order(
+                order = await order_mgr.execute_order(
                     symbol=ps.symbol,
                     side='SELL',
                     quantity=qty
                 )
+                
+                # Extract exit fee
+                exit_fee = order.get('total_fee_usdt', 0.0) if order else 0.0
+                
                 self.logger.info(
                     f"{msg_prefix} {ps.symbol} | "
-                    f"SOLD {qty:.8f} @ ~${mkt_price:.6f} | {reason}"
+                    f"SOLD {qty:.8f} @ ~${mkt_price:.6f} | Fee: ${exit_fee:.4f} | {reason}"
                 )
+                
+                # Telegram notification handled by main bot via on_position_closed callback
             
             # Update remaining quantity
             ps.remaining_qty = round(ps.remaining_qty - qty, 8)
@@ -479,6 +540,22 @@ class RealtimePositionMonitor:
             if ps.remaining_qty <= 0:
                 ps.closed = True
                 self.logger.info(f"✅ RTM: {ps.symbol} position fully closed")
+                
+                # Notify bot that position was closed with exit details
+                if self.on_position_closed:
+                    try:
+                        # Pass exit data to callback for logging (include exit fee)
+                        exit_data = {
+                            'symbol': ps.symbol,
+                            'entry_price': ps.entry_price,
+                            'exit_price': mkt_price,
+                            'qty': qty,
+                            'reason': reason,
+                            'exit_fee_usdt': exit_fee if not self.config.dry_run else 0.0
+                        }
+                        await self.on_position_closed(exit_data)
+                    except Exception as e:
+                        self.logger.error(f"RTM: Error in on_position_closed callback: {e}")
         
         except Exception as e:
             self.logger.exception(f"RTM: Exit error for {ps.symbol}: {e}")

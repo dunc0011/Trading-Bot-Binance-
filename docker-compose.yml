@@ -10,6 +10,7 @@ services:
       - .env
     ports:
       - "5000:5000"
+      - "6006:6006"  # TensorBoard
     volumes:
       # Mount logs for persistence
       - ./logs:/app/logs
@@ -21,10 +22,11 @@ services:
       - ./src:/app/src
       - ./config:/app/config
       - ./web:/app/web
+      - ./start.sh:/app/start.sh
     environment:
       - PYTHONUNBUFFERED=1
       - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-dev-secret-key-change-in-production}
-    command: python src/web_app.py
+    command: sh -c "python -m tensorboard.main --logdir logs/rl_tensorboard --bind_all --port 6006 & python src/web_app.py"
     networks:
       - trading-network
     logging:

@@ -4,6 +4,7 @@ Flask Web Application for Trading Bot Control and Monitoring
 import os
 import json
 import logging
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
@@ -155,12 +156,15 @@ class BotManager:
         }
     
     def get_positions(self):
-        """Get active positions from multi-pair bot"""
+        """Get active positions from multi-pair bot with trailing stop info"""
         if not self.bot or not hasattr(self.bot, 'active_positions'):
             return []
         
         positions = []
-        for symbol, pos in self.bot.active_positions.items():
+        # Copy dict to avoid "dictionary changed size during iteration" error
+        active_positions_snapshot = dict(self.bot.active_positions)
+        
+        for symbol, pos in active_positions_snapshot.items():
             try:
                 # Get current price
                 ticker = self.bot.client.get_symbol_ticker(symbol=symbol)
@@ -176,6 +180,42 @@ class BotManager:
                 entry_time = datetime.fromisoformat(pos['timestamp'])
                 duration = str(datetime.now() - entry_time).split('.')[0]
                 
+                # Get RTM trailing stop info if available
+                peak_price = pos.get('highest_price')  # Fallback to legacy field
+                trailing_stop = None
+                
+                if hasattr(self.bot, 'rtm') and self.bot.rtm:
+                    try:
+                        import asyncio
+                        # Get RTM's event loop - try self.bot.rtm.loop first, fallback to getting from bot thread
+                        rtm_loop = self.bot.rtm.loop
+                        
+                        if not rtm_loop:
+                            # RTM not started yet or loop not set
+                            logger.debug(f"RTM loop not available yet for {symbol}")
+                        else:
+                            # Use bot's event loop to get RTM data
+                            future = asyncio.run_coroutine_threadsafe(
+                                self.bot.rtm.get_position_data(symbol),
+                                rtm_loop
+                            )
+                            rtm_data = future.result(timeout=1.0)  # 1s timeout
+                            
+                            if rtm_data:
+                                peak_price = rtm_data['peak_price']
+                                trailing_stop = rtm_data['trailing_stop']
+                                logger.info(f"✅ RTM data for {symbol}: peak=${peak_price:.2f}, stop=${trailing_stop:.2f}")
+                            else:
+                                logger.info(f"⚠️  RTM returned None for {symbol} (position not tracked yet)")
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(f"⏱️  Timeout getting RTM data for {symbol}")
+                    except Exception as e:
+                        logger.warning(f"❌ Could not get RTM info for {symbol}: {e}")
+                
+                # Ensure peak is never less than current (handle race condition)
+                if peak_price and current_price > peak_price:
+                    peak_price = current_price
+                
                 positions.append({
                     'symbol': symbol,
                     'entry_price': entry_price,
@@ -184,10 +224,28 @@ class BotManager:
                     'pnl': pnl,
                     'pnl_pct': pnl_pct,
                     'ml_confidence': pos.get('ml_confidence', 0),
-                    'duration': duration
+                    'duration': duration,
+                    'peak_price': peak_price,
+                    'trailing_stop': trailing_stop
                 })
             except Exception as e:
-                logger.error(f"Error getting position info for {symbol}: {e}")
+                logger.error(f"Error getting position info for {symbol}: {e}", exc_info=True)
+                # Still add position with basic info even if RTM fetch fails
+                try:
+                    positions.append({
+                        'symbol': symbol,
+                        'entry_price': pos['entry_price'],
+                        'current_price': pos.get('entry_price', 0),  # Fallback to entry
+                        'size': pos.get('size', 0),
+                        'pnl': 0,
+                        'pnl_pct': 0,
+                        'ml_confidence': pos.get('ml_confidence', 0),
+                        'duration': 'Error',
+                        'peak_price': pos.get('entry_price', 0),
+                        'trailing_stop': None
+                    })
+                except:
+                    pass
         
         return positions
 
@@ -200,6 +258,49 @@ bot_manager = BotManager()
 def index():
     """Main dashboard page"""
     return render_template('dashboard.html')
+
+
+@app.route('/rl')
+def rl_training():
+    """RL agent training page"""
+    return render_template('rl_training.html')
+
+
+@app.route('/learning')
+def learning_analytics():
+    """Learning analytics dashboard"""
+    return render_template('learning_analytics.html')
+
+
+@app.route('/api/learning/analytics')
+def api_learning_analytics():
+    """Get learning analytics data"""
+    try:
+        from utils.trade_logger import TradeLogger
+        logger_instance = TradeLogger()
+        
+        # Get stats and win rates by context
+        stats = logger_instance.get_stats()
+        context_data = logger_instance.get_win_rate_by_context()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'by_confidence': context_data.get('by_confidence', []),
+            'by_regime': context_data.get('by_regime', []),
+            'by_confluence': context_data.get('by_confluence', [])
+        })
+    except Exception as e:
+        logger.error(f"Error fetching learning analytics: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+
+
+@app.route('/tensorboard')
+def tensorboard_viewer():
+    """TensorBoard viewer for RL training visualization"""
+    return render_template('tensorboard.html')
 
 
 @app.route('/api/status')
@@ -577,6 +678,331 @@ def api_models():
     return jsonify({'success': True, 'models': models})
 
 
+@app.route('/api/rl/train', methods=['POST'])
+def api_rl_train():
+    """Train RL agent for a specific symbol"""
+    data = request.json
+    symbol = data.get('symbol', 'BTCUSDT')
+    timeframe = data.get('timeframe', '5m')
+    lookback_days = data.get('lookback_days', 180)
+    total_timesteps = data.get('total_timesteps', 100000)
+    algorithm = data.get('algorithm', 'PPO')
+    
+    try:
+        from utils.rl_agent import train_rl_agent_for_symbol
+        
+        # Start RL training in background thread
+        def rl_train_worker():
+            try:
+                socketio.emit('rl_training_progress', {
+                    'symbol': symbol,
+                    'status': 'started',
+                    'message': f'Starting {algorithm} training for {symbol}'
+                })
+                
+                # Train agent
+                agent, eval_stats = train_rl_agent_for_symbol(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    lookback_days=lookback_days,
+                    total_timesteps=total_timesteps
+                )
+                
+                # Emit completion
+                socketio.emit('rl_training_complete', {
+                    'success': True,
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'stats': eval_stats
+                })
+                
+            except Exception as e:
+                logger.error(f"RL training failed for {symbol}: {e}", exc_info=True)
+                socketio.emit('rl_training_complete', {
+                    'success': False,
+                    'symbol': symbol,
+                    'error': str(e)
+                })
+        
+        thread = Thread(target=rl_train_worker, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': f'{algorithm} training started for {symbol} {timeframe}',
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'total_timesteps': total_timesteps
+        })
+    
+    except Exception as e:
+        logger.error(f"RL training failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/rl/models')
+def api_rl_models():
+    """List available trained RL models"""
+    models_dir = Path('models/rl_agents')
+    
+    if not models_dir.exists():
+        return jsonify({'success': True, 'models': []})
+    
+    models = []
+    for meta_file in models_dir.glob('*.meta.json'):
+        try:
+            with open(meta_file, 'r') as f:
+                meta = json.load(f)
+                models.append({
+                    'file': meta_file.stem,
+                    'symbol': meta.get('symbol'),
+                    'timeframe': meta.get('timeframe'),
+                    'algorithm': meta.get('algorithm'),
+                    'trained_at': meta.get('trained_at'),
+                    'total_timesteps': meta.get('total_timesteps'),
+                    'data_samples': meta.get('data_samples'),
+                    'evaluation': meta.get('evaluation', {})
+                })
+        except Exception as e:
+            logger.error(f"Error reading {meta_file}: {e}")
+    
+    return jsonify({'success': True, 'models': models})
+
+
+@app.route('/api/rl/auto_train', methods=['POST'])
+def api_rl_auto_train():
+    """Automatically train RL agents for top volume pairs"""
+    data = request.json or {}
+    max_pairs = data.get('max_pairs', 10)
+    timeframe = data.get('timeframe', '5m')
+    lookback_days = data.get('lookback_days', 180)
+    total_timesteps = data.get('total_timesteps', 100000)
+    
+    try:
+        from utils.rl_auto_trainer import RLAutoTrainer
+        
+        # Start auto-trainer in background thread
+        def auto_train_worker():
+            try:
+                socketio.emit('rl_auto_training_started', {
+                    'message': f'Discovering top {max_pairs} pairs and starting training...',
+                    'max_pairs': max_pairs
+                })
+                
+                trainer = RLAutoTrainer(
+                    max_pairs=max_pairs,
+                    timeframe=timeframe,
+                    lookback_days=lookback_days,
+                    total_timesteps=total_timesteps
+                )
+                
+                # Run single training cycle (not continuous)
+                trainer.train_all_pairs_once()
+                
+                socketio.emit('rl_auto_training_complete', {
+                    'success': True,
+                    'message': f'Successfully trained models for top {max_pairs} pairs'
+                })
+                
+            except Exception as e:
+                logger.error(f"RL auto-training failed: {e}", exc_info=True)
+                socketio.emit('rl_auto_training_complete', {
+                    'success': False,
+                    'error': str(e)
+                })
+        
+        thread = Thread(target=auto_train_worker, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Auto-training started for top {max_pairs} pairs'
+        })
+    
+    except Exception as e:
+        logger.error(f"Failed to start auto-training: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/rl/evaluate', methods=['POST'])
+def api_rl_evaluate():
+    """Evaluate a trained RL model"""
+    data = request.json
+    symbol = data.get('symbol', 'BTCUSDT')
+    timeframe = data.get('timeframe', '5m')
+    n_episodes = data.get('n_episodes', 10)
+    
+    try:
+        from utils.rl_agent import RLTradingAgent
+        from binance.client import Client
+        from datetime import datetime, timedelta
+        import pandas as pd
+        
+        # Load agent
+        agent = RLTradingAgent(symbol=symbol, timeframe=timeframe)
+        agent.load()
+        
+        # Fetch test data
+        config = Config()
+        if config.trading_mode == "testnet":
+            client = Client(config.api_key, config.api_secret, testnet=True)
+        else:
+            client = Client(config.api_key, config.api_secret)
+        
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=30)  # Test on last 30 days
+        
+        klines = client.get_historical_klines(
+            symbol=symbol,
+            interval=timeframe,
+            start_str=str(int(start_time.timestamp() * 1000)),
+            end_str=str(int(end_time.timestamp() * 1000))
+        )
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'num_trades',
+            'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+        
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col])
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        # Add features (same as training)
+        df['returns'] = df['close'].pct_change()
+        df['sma_10'] = df['close'].rolling(10).mean()
+        df['sma_30'] = df['close'].rolling(30).mean()
+        df['volume_sma'] = df['volume'].rolling(10).mean()
+        df['volatility'] = df['returns'].rolling(20).std()
+        
+        # Drop NaN
+        df = df.dropna()
+        
+        # Evaluate
+        eval_stats = agent.evaluate(df, n_episodes=n_episodes)
+        
+        return jsonify({
+            'success': True,
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'stats': eval_stats
+        })
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': f'No trained model found for {symbol} {timeframe}'
+        })
+    except Exception as e:
+        logger.error(f"RL evaluation failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/learning/stats')
+def api_learning_stats():
+    """Get learning statistics from TradeLogger"""
+    try:
+        from utils.trade_logger import TradeLogger
+        logger_obj = TradeLogger()
+        
+        # Use the built-in get_stats method
+        stats = logger_obj.get_stats()
+        context_stats = logger_obj.get_win_rate_by_context()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'context_stats': context_stats
+        })
+    except Exception as e:
+        logger.error(f"Error fetching learning stats: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/learning/trades')
+def api_learning_trades():
+    """Get recent trades with full details"""
+    try:
+        from utils.trade_logger import TradeLogger
+        logger_obj = TradeLogger()
+        
+        limit = request.args.get('limit', 50, type=int)
+        limit = min(limit, 500)  # Cap at 500
+        
+        trades_df = logger_obj.get_recent_trades(limit=limit)
+        
+        if trades_df.empty:
+            return jsonify({
+                'success': True,
+                'trades': [],
+                'count': 0
+            })
+        
+        # Convert DataFrame to list of dicts
+        trades_json = trades_df.to_dict('records')
+        
+        return jsonify({
+            'success': True,
+            'trades': trades_json,
+            'count': len(trades_json)
+        })
+    except Exception as e:
+        logger.error(f"Error fetching trades: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/learning/performance')
+def api_learning_performance():
+    """Get performance metrics over time"""
+    try:
+        from utils.trade_logger import TradeLogger
+        import pandas as pd
+        logger_obj = TradeLogger()
+        
+        # Get trades grouped by day
+        trades_df = logger_obj.get_recent_trades(limit=500)
+        
+        if trades_df.empty:
+            return jsonify({
+                'success': True,
+                'performance': [],
+                'cumulative_returns': []
+            })
+        
+        # Convert entry_time to datetime and extract date
+        trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'])
+        trades_df['date'] = trades_df['entry_time'].dt.date.astype(str)
+        
+        # Group by date
+        daily_stats = trades_df.groupby('date').agg({
+            'profit_pct': ['count', 'sum', 'mean'],
+            'outcome': lambda x: (x == 'WIN').sum(),
+            'ml_confidence': 'mean'
+        }).reset_index()
+        
+        # Flatten column names
+        daily_stats.columns = ['date', 'trades', 'total_profit_pct', 'avg_profit_pct', 'wins', 'avg_confidence']
+        daily_stats['win_rate'] = daily_stats['wins'] / daily_stats['trades']
+        
+        # Calculate cumulative returns
+        daily_stats['cumulative_return'] = daily_stats['total_profit_pct'].cumsum()
+        
+        performance_data = daily_stats[['date', 'trades', 'wins', 'win_rate', 'total_profit_pct', 'avg_confidence']].to_dict('records')
+        cumulative_returns = daily_stats[['date', 'cumulative_return']].to_dict('records')
+        
+        return jsonify({
+            'success': True,
+            'performance': performance_data,
+            'cumulative_returns': cumulative_returns
+        })
+    except Exception as e:
+        logger.error(f"Error fetching performance: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
 @app.route('/api/logs')
 def api_logs():
     """Get recent log entries from specific log file"""
@@ -684,6 +1110,181 @@ def api_trades():
         return jsonify({'success': False, 'message': str(e)})
 
 
+@app.route('/api/sell_position', methods=['POST'])
+def api_sell_position():
+    """Manually close a position at market price"""
+    try:
+        data = request.json
+        symbol = data.get('symbol')
+        
+        if not symbol:
+            return jsonify({'success': False, 'message': 'Symbol is required'})
+        
+        # Check if bot is running and has the position
+        if not bot_manager.bot or not hasattr(bot_manager.bot, 'active_positions'):
+            return jsonify({'success': False, 'message': 'Bot not running or no positions available'})
+        
+        if symbol not in bot_manager.bot.active_positions:
+            return jsonify({'success': False, 'message': f'Position {symbol} not found'})
+        
+        # Get position details
+        position = bot_manager.bot.active_positions[symbol]
+        entry_price = position['entry_price']
+        size_usdt = position['size']
+        
+        # Get current price
+        ticker = bot_manager.bot.client.get_symbol_ticker(symbol=symbol)
+        current_price = float(ticker['price'])
+        
+        # Calculate P&L
+        pnl = (current_price - entry_price) * (size_usdt / entry_price)
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        
+        logger.info(f"Manual sell requested for {symbol}: entry=${entry_price:.2f}, current=${current_price:.2f}, P&L=${pnl:.2f}")
+        
+        # Execute market sell order
+        if not bot_manager.config.dry_run:
+            try:
+                client = bot_manager.bot.client
+                # Get symbol info for quantity precision and notional
+                symbol_info = client.get_symbol_info(symbol)
+                
+                # Filters
+                lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+                min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL','NOTIONAL','MARKET_MIN_NOTIONAL')), None)
+                
+                step_size = float(lot_size_filter['stepSize']) if lot_size_filter else 0.000001
+                min_notional = float(min_notional_filter.get('minNotional', 0)) if min_notional_filter else 0
+                
+                # Determine base asset and fetch available balance
+                if symbol.endswith('USDT'):
+                    base_asset = symbol[:-4]
+                else:
+                    # Fallback: take until last 4 chars
+                    base_asset = symbol.replace('USDT', '')
+                
+                balance = client.get_asset_balance(asset=base_asset)
+                available_qty = float(balance.get('free', 0))
+                
+                if available_qty <= 0:
+                    return jsonify({'success': False, 'message': f'No available balance for {base_asset} to sell'})
+                
+                # Safety margin to avoid insufficient balance due to fees/dust
+                target_qty = available_qty * 0.999
+                
+                # Round down to step size
+                from decimal import Decimal, ROUND_DOWN
+                step_size_decimal = Decimal(str(step_size))
+                qty_decimal = Decimal(str(target_qty))
+                qty_rounded = float((qty_decimal / step_size_decimal).quantize(Decimal('1'), rounding=ROUND_DOWN) * step_size_decimal)
+                
+                # Ensure notional meets minimum
+                notional = qty_rounded * current_price
+                if min_notional and notional < min_notional:
+                    return jsonify({'success': False, 'message': f'Order notional ${notional:.2f} below minimum ${min_notional:.2f}'})
+                
+                if qty_rounded <= 0:
+                    return jsonify({'success': False, 'message': 'Calculated sell quantity is too small after rounding'})
+                
+                logger.info(f"Executing SELL order for {symbol}: qty={qty_rounded} (avail={available_qty}, price={current_price})")
+                
+                # Place market sell order
+                order = client.create_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='MARKET',
+                    quantity=qty_rounded
+                )
+                
+                logger.info(f"✅ Market sell executed: {order}")
+                
+                # Actual fill price and qty
+                fills = order.get('fills', [])
+                if fills:
+                    # Weighted average fill
+                    total_qty = sum(float(f.get('qty', 0) or f.get('quantity', 0) or 0) for f in fills) or qty_rounded
+                    total_quote = sum(float(f.get('price', current_price)) * float(f.get('qty', 0) or f.get('quantity', 0) or 0) for f in fills)
+                    fill_price = (total_quote / total_qty) if total_qty > 0 else current_price
+                else:
+                    fill_price = current_price
+                
+                # Use the actual qty sold for P&L computation
+                quantity_sold = qty_rounded
+            except Exception as e:
+                logger.error(f"Failed to execute sell order for {symbol}: {e}", exc_info=True)
+                return jsonify({'success': False, 'message': f'Order execution failed: {str(e)}'})
+        else:
+            logger.info(f"[DRY RUN] Would execute SELL order for {symbol}")
+            fill_price = current_price
+            # Assume we sell full virtual qty based on position size
+            quantity_sold = size_usdt / entry_price if entry_price else 0.0
+        
+        # Record the trade in performance tracker
+        try:
+            from performance_tracker import PerformanceTracker
+            tracker = PerformanceTracker()
+            
+            tracker.log_trade(
+                symbol=symbol,
+                action='SELL',
+                entry_price=entry_price,
+                exit_price=fill_price,
+                size=size_usdt,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                ml_confidence=position.get('ml_confidence', 0),
+                reason='Manual close via UI'
+            )
+            logger.info(f"Trade logged to performance tracker")
+        except Exception as e:
+            logger.warning(f"Failed to log trade to performance tracker: {e}")
+        
+        # Remove from active positions
+        del bot_manager.bot.active_positions[symbol]
+        logger.info(f"Position {symbol} removed from active_positions")
+        
+        # Remove from RTM tracking if exists
+        if hasattr(bot_manager.bot, 'rtm') and bot_manager.bot.rtm:
+            try:
+                import asyncio
+                rtm_loop = bot_manager.bot.rtm.loop
+                if rtm_loop:
+                    future = asyncio.run_coroutine_threadsafe(
+                        bot_manager.bot.rtm.unregister_position(symbol),
+                        rtm_loop
+                    )
+                    future.result(timeout=2.0)
+                    logger.info(f"Position {symbol} removed from RTM tracker")
+            except Exception as e:
+                logger.warning(f"Failed to remove {symbol} from RTM: {e}")
+        
+        # Emit update via SocketIO
+        socketio.emit('trade_executed', {
+            'symbol': symbol,
+            'action': 'SELL',
+            'price': fill_price,
+            'size': size_usdt,
+            'pnl': pnl,
+            'pnl_pct': pnl_pct,
+            'confidence': position.get('ml_confidence', 0),
+            'timestamp': datetime.now().isoformat(),
+            'manual': True
+        })
+        
+        return jsonify({
+            'success': True,
+            'message': f'Position closed successfully',
+            'symbol': symbol,
+            'price': fill_price,
+            'pnl': pnl,
+            'pnl_pct': pnl_pct
+        })
+    
+    except Exception as e:
+        logger.error(f"Error selling position: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
 @app.route('/api/performance')
 def api_performance():
     """Get performance chart data"""
@@ -700,6 +1301,61 @@ def api_performance():
         })
     except Exception as e:
         logger.error(f"Error getting performance data: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/train/advanced', methods=['POST'])
+def api_train_advanced():
+    """Train a single advanced ML model (called by UI)"""
+    data = request.json
+    symbol = data.get('symbol')
+    interval = data.get('interval', '15m')
+    lookback_days = data.get('lookback_days', 180)
+    optimize = data.get('optimize', False)
+    
+    if not symbol:
+        return jsonify({'success': False, 'message': 'Symbol is required'})
+    
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent))
+        from utils.train_advanced_model import main as train_advanced_main
+        
+        # Start training in background thread
+        def train_worker():
+            try:
+                old_argv = sys.argv
+                sys.argv = ['train_advanced_ml_model', '--symbol', symbol, 
+                           '--interval', interval, '--lookback-days', str(lookback_days)]
+                if optimize:
+                    sys.argv.append('--optimize')
+                
+                train_advanced_main()
+                sys.argv = old_argv
+                
+                # Emit success
+                socketio.emit('batch_training_progress', {
+                    'symbol': symbol,
+                    'status': 'complete'
+                })
+            except Exception as e:
+                logger.error(f"Training failed for {symbol}: {e}", exc_info=True)
+                socketio.emit('batch_training_progress', {
+                    'symbol': symbol,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        thread = Thread(target=train_worker, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Training started for {symbol}'
+        })
+    
+    except Exception as e:
+        logger.error(f"Failed to start training: {e}", exc_info=True)
         return jsonify({'success': False, 'message': str(e)})
 
 
@@ -720,6 +1376,298 @@ def api_continuous_trainer_status():
             })
     except Exception as e:
         logger.error(f"Error getting continuous trainer status: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/analytics')
+def analytics():
+    """Analytics page"""
+    return render_template('analytics.html')
+
+
+@app.route('/api/analytics/overview')
+def api_analytics_overview():
+    """Get overall performance stats"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    COUNT(*) as total_trades,
+                    ROUND(SUM(pnl), 2) as total_pnl,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+            ''')
+            row = cursor.fetchone()
+            stats = dict(row) if row else {'total_trades': 0, 'total_pnl': 0, 'avg_pnl': 0, 'win_rate': 0}
+        
+        return jsonify({'success': True, 'stats': stats})
+    except Exception as e:
+        logger.error(f"Error getting analytics overview: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/top-pairs')
+def api_analytics_top_pairs():
+    """Get top performing pairs"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY avg_pnl DESC
+                LIMIT 5
+            ''')
+            pairs = [dict(row) for row in cursor.fetchall()]
+        
+        return jsonify({'success': True, 'pairs': pairs})
+    except Exception as e:
+        logger.error(f"Error getting top pairs: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/daily-pnl')
+def api_analytics_daily_pnl():
+    """Get daily P&L data"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    DATE(exit_time) as trade_date,
+                    ROUND(SUM(pnl), 2) as daily_pnl
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                GROUP BY DATE(exit_time)
+                ORDER BY trade_date
+            ''')
+            data = [dict(row) for row in cursor.fetchall()]
+        
+        dates = [row['trade_date'] for row in data]
+        pnl = [row['daily_pnl'] for row in data]
+        
+        return jsonify({'success': True, 'dates': dates, 'pnl': pnl})
+    except Exception as e:
+        logger.error(f"Error getting daily P&L: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/confidence')
+def api_analytics_confidence():
+    """Get performance by confidence level"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    CASE 
+                        WHEN ml_confidence < 0.60 THEN '50-60%'
+                        WHEN ml_confidence < 0.70 THEN '60-70%'
+                        WHEN ml_confidence < 0.80 THEN '70-80%'
+                        WHEN ml_confidence < 0.90 THEN '80-90%'
+                        ELSE '90-100%'
+                    END as conf_range,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE ml_confidence IS NOT NULL
+                    AND exit_time >= datetime('now', '-30 days')
+                GROUP BY conf_range
+                ORDER BY conf_range
+            ''')
+            data = [dict(row) for row in cursor.fetchall()]
+        
+        ranges = [row['conf_range'] for row in data]
+        win_rates = [row['win_rate'] for row in data]
+        
+        return jsonify({'success': True, 'ranges': ranges, 'win_rates': win_rates})
+    except Exception as e:
+        logger.error(f"Error getting confidence data: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/by-symbol')
+def api_analytics_by_symbol():
+    """Get performance breakdown by symbol"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    ROUND(SUM(pnl), 2) as total_pnl,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate,
+                    ROUND(AVG(ml_confidence) * 100, 1) as avg_confidence
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                GROUP BY symbol
+                HAVING COUNT(*) >= 1
+                ORDER BY total_pnl DESC
+            ''')
+            symbols_data = [dict(row) for row in cursor.fetchall()]
+        
+        return jsonify({'success': True, 'symbols': symbols_data})
+    except Exception as e:
+        logger.error(f"Error getting by-symbol data: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/by-time')
+def api_analytics_by_time():
+    """Get performance breakdown by hour and day of week"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # Hour of day analysis
+            hour_cursor = conn.execute('''
+                SELECT 
+                    CAST(strftime('%H', exit_time) AS INTEGER) as hour,
+                    COUNT(*) as trades,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                GROUP BY hour
+                ORDER BY hour
+            ''')
+            hour_data = [dict(row) for row in hour_cursor.fetchall()]
+            
+            # Day of week analysis (0=Sunday, 6=Saturday)
+            day_cursor = conn.execute('''
+                SELECT 
+                    CAST(strftime('%w', exit_time) AS INTEGER) as day,
+                    COUNT(*) as trades,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                GROUP BY day
+                ORDER BY day
+            ''')
+            day_data = [dict(row) for row in day_cursor.fetchall()]
+        
+        # Map day numbers to names
+        day_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+        for item in day_data:
+            item['day_name'] = day_names[item['day']]
+        
+        return jsonify({'success': True, 'by_hour': hour_data, 'by_day': day_data})
+    except Exception as e:
+        logger.error(f"Error getting by-time data: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/confidence-pnl')
+def api_analytics_confidence_pnl():
+    """Get average P&L by confidence level"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    CASE 
+                        WHEN ml_confidence < 0.60 THEN '50-60%'
+                        WHEN ml_confidence < 0.70 THEN '60-70%'
+                        WHEN ml_confidence < 0.80 THEN '70-80%'
+                        WHEN ml_confidence < 0.90 THEN '80-90%'
+                        ELSE '90-100%'
+                    END as conf_range,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                    COUNT(*) as trades
+                FROM trades
+                WHERE ml_confidence IS NOT NULL
+                    AND exit_time >= datetime('now', '-30 days')
+                GROUP BY conf_range
+                ORDER BY conf_range
+            ''')
+            data = [dict(row) for row in cursor.fetchall()]
+        
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error(f"Error getting confidence P&L data: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/analytics/hold-duration')
+def api_analytics_hold_duration():
+    """Get performance by hold duration"""
+    try:
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT 
+                    CASE 
+                        WHEN (julianday(exit_time) - julianday(entry_time)) * 24 < 1 THEN '< 1h'
+                        WHEN (julianday(exit_time) - julianday(entry_time)) * 24 < 4 THEN '1-4h'
+                        WHEN (julianday(exit_time) - julianday(entry_time)) * 24 < 12 THEN '4-12h'
+                        WHEN (julianday(exit_time) - julianday(entry_time)) * 24 < 24 THEN '12-24h'
+                        ELSE '> 24h'
+                    END as duration_range,
+                    COUNT(*) as trades,
+                    ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                    ROUND(SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                FROM trades
+                WHERE exit_time >= datetime('now', '-30 days')
+                    AND entry_time IS NOT NULL
+                GROUP BY duration_range
+                ORDER BY 
+                    CASE duration_range
+                        WHEN '< 1h' THEN 1
+                        WHEN '1-4h' THEN 2
+                        WHEN '4-12h' THEN 3
+                        WHEN '12-24h' THEN 4
+                        WHEN '> 24h' THEN 5
+                    END
+            ''')
+            data = [dict(row) for row in cursor.fetchall()]
+        
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error(f"Error getting hold duration data: {e}")
         return jsonify({'success': False, 'message': str(e)})
 
 
@@ -744,17 +1692,49 @@ def api_scan_market():
         logger.info("Fetching market data...")
         tickers = client.get_ticker()
         
-        # Load available models
-        models_dir = Path('models/ml_ema')
+        # Load available models (check both advanced and legacy)
         available_models = {}
-        if models_dir.exists():
-            for model_file in models_dir.glob('*_ml_ema.joblib'):
+        
+        # Check advanced models first (preferred)
+        advanced_dir = Path('models/advanced_ml')
+        if advanced_dir.exists():
+            for meta_file in advanced_dir.glob('*_advanced_ml.meta.json'):
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                    
+                    # Parse filename: BTCUSDT_5m_advanced_ml.meta.json
+                    parts = meta_file.stem.replace('_advanced_ml.meta', '').split('_')
+                    if len(parts) >= 2:
+                        symbol = parts[0]
+                        timeframe = parts[1]
+                        key = f"{symbol}_{timeframe}"
+                        
+                        available_models[key] = {
+                            'model_path': str(meta_file.with_suffix('.joblib')),
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'accuracy': meta.get('accuracy', 0),
+                            'f1_score': meta.get('f1', 0),
+                            'model_type': 'advanced'
+                        }
+                except Exception as e:
+                    logger.debug(f"Error loading advanced model {meta_file}: {e}")
+        
+        # Fallback to legacy models (only if symbol not in advanced)
+        legacy_dir = Path('models/ml_ema')
+        if legacy_dir.exists():
+            for model_file in legacy_dir.glob('*_ml_ema.joblib'):
                 # Parse filename: BTCUSDT_1h_ml_ema.joblib
                 parts = model_file.stem.split('_')
                 if len(parts) >= 3:
                     symbol = parts[0]
                     timeframe = parts[1]
                     key = f"{symbol}_{timeframe}"
+                    
+                    # Skip if advanced model already loaded
+                    if key in available_models:
+                        continue
                     
                     # Load model metadata
                     meta_file = model_file.with_suffix('.meta.json')
@@ -766,7 +1746,8 @@ def api_scan_market():
                                 'symbol': symbol,
                                 'timeframe': timeframe,
                                 'accuracy': meta.get('accuracy', 0),
-                                'f1_score': meta.get('f1', 0)
+                                'f1_score': meta.get('f1', 0),
+                                'model_type': 'legacy'
                             }
         
         # Filter and process USDT pairs
@@ -794,7 +1775,7 @@ def api_scan_market():
                     continue
                 
                 # Check if we have a trained model
-                model_key = f"{symbol}_1h"  # Default to 1h timeframe
+                model_key = f"{symbol}_{config.timeframe}"  # Use configured timeframe
                 has_model = model_key in available_models
                 ml_confidence = 0
                 ml_signal = 'HOLD'
@@ -859,8 +1840,8 @@ def api_scan_market():
         # Sort by volume (highest first)
         results.sort(key=lambda x: x['volume_24h'], reverse=True)
         
-        # Return top 50 pairs
-        top_pairs = results[:50]
+        # Return all pairs (was limited to 50)
+        top_pairs = results
         
         return jsonify({
             'success': True,
@@ -875,12 +1856,41 @@ def api_scan_market():
         return jsonify({'success': False, 'message': str(e)})
 
 
+# Background task for live position updates
+def emit_live_positions():
+    """Emit position updates every 2 seconds"""
+    import time
+    while True:
+        try:
+            if bot_running and bot_manager.bot:
+                positions = bot_manager.get_positions()
+                socketio.emit('positions_update', {
+                    'positions': positions,
+                    'timestamp': datetime.now().isoformat()
+                })
+            time.sleep(2)  # Update every 2 seconds
+        except Exception as e:
+            logger.debug(f"Error emitting positions: {e}")
+            time.sleep(2)
+
+# Start background task
+import threading
+positions_thread = threading.Thread(target=emit_live_positions, daemon=True)
+positions_thread.start()
+
 # WebSocket events
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection"""
     logger.info('Client connected')
     emit('status', bot_manager.get_status())
+    # Send initial positions
+    if bot_running and bot_manager.bot:
+        positions = bot_manager.get_positions()
+        emit('positions_update', {
+            'positions': positions,
+            'timestamp': datetime.now().isoformat()
+        })
 
 
 @socketio.on('disconnect')

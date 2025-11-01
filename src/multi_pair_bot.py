@@ -16,8 +16,19 @@ from typing import Dict, List, Optional
 import json
 
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from config.config import Config
 from strategies.advanced_ml_strategy import AdvancedMLStrategy
+
+# Try to import RL strategy (optional dependency)
+try:
+    from strategies.rl_strategy import RLStrategy
+    RL_AVAILABLE = True
+except ImportError:
+    RL_AVAILABLE = False
+    import logging
+    logging.warning("RL strategy not available - install stable-baselines3 to enable")
+
 from utils.advanced_risk_manager import AdvancedRiskManager
 from utils.order_manager import OrderManager
 from utils.continuous_trainer import ContinuousTrainer
@@ -28,6 +39,13 @@ from performance_tracker import PerformanceTracker
 from alerts.telegram_client import TelegramClient
 from monitoring.model_monitor import ModelMonitor
 from risk.portfolio_risk import PortfolioRiskManager
+# Adaptive learning systems
+from analytics.pattern_analyzer import PatternAnalyzer
+from adaptive.parameter_tuner import AdaptiveParameterTuner
+from meta_learning.ensemble_optimizer import EnsembleOptimizer
+from utils.trade_logger import TradeLogger
+from utils.rl_online_learner import get_online_learner
+from utils.position_tracker import PositionTracker
 
 
 logger = logging.getLogger(__name__)
@@ -82,14 +100,17 @@ class MultiPairBot:
         # Setup file logging
         setup_file_logger(__name__, 'logs/multi_pair_bot.log', logging.INFO)
         
-        # Binance client
+        # Binance client with increased recvWindow for timestamp tolerance
         if config.trading_mode == "testnet":
             self.client = Client(config.api_key, config.api_secret, testnet=True)
         else:
             self.client = Client(config.api_key, config.api_secret)
         
+        # Increase recvWindow to 10 seconds to handle network latency
+        self.client.timestamp_offset = 0  # Auto-sync with Binance server time
+        
         # Portfolio settings - DYNAMIC POSITION SIZING
-        self.max_concurrent_positions = 3  # Max 3 open positions
+        self.max_concurrent_positions = 15  # Max 15 open positions
         
         # Use percentage-based sizing as base (supports None for max_position_size)
         if config.max_position_size is not None:
@@ -101,7 +122,7 @@ class MultiPairBot:
             self.max_position_size = None  # No fixed cap
         
         self.position_size_percentage = config.position_size_percentage
-        self.total_portfolio_limit = 250   # Max $250 total (62% of $400)
+        self.total_portfolio_limit = None  # Will be set dynamically based on account balance
         
         # Dynamic sizing based on ML confidence:
         # 55-65% confidence → $20-40 position (5-10% of balance)
@@ -120,9 +141,33 @@ class MultiPairBot:
         
         # Track active positions and strategies
         self.active_positions = {}  # symbol -> position info
+        self.position_tracker = PositionTracker()  # Persistent storage
         self.strategies = {}        # symbol -> MLEMAStrategy instance
         self.risk_managers = {}     # symbol -> RiskManager instance
         self.order_managers = {}    # symbol -> OrderManager instance
+        self.model_accuracies = {}  # symbol -> accuracy (for priority scoring)
+        self.model_performance = {}  # symbol -> {'consecutive_losses': int, 'disabled_until': timestamp}
+        self.model_loss_threshold = 3  # Disable model after 3 consecutive losses
+        self.model_cooldown_hours = 24  # Re-enable after 24 hours
+        
+        # Blacklist symbols with proven terrible performance or no volatility
+        self.blacklisted_symbols = {
+            # Terrible performers
+            'ZECUSDT', 'PEPEUSDT', 'FLOKIUSDT', 'PENDLEUSDT', 'ETHFIUSDT', 'PENGUUSDT', 'ONDOUSDT',
+            # Stablecoins (no volatility - always 1:1)
+            'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'BUSDUSDT', 'USDEUSDT', 'USDPUSDT', 'PAXUSDT',
+            # Not permitted on this account
+            'FFUSDT', 'VIRTUALUSDT', 'EULUSDT'
+        }
+        
+        # Confidence filter: Accept 55-100% confidence signals
+        self.min_confidence = 0.55  # Minimum 55% - accept more signals
+        self.max_confidence = 1.00  # No cap - accept all high confidence signals
+        
+        # Intelligent scanning state
+        self.recently_exited = {}   # symbol -> exit_timestamp (track for 15 mins)
+        self.all_pairs_rotation_idx = 0  # Rotate through all pairs on alternating cycles
+        self.scan_all_pairs_this_cycle = False  # Toggle between full scan and position-only
         
         # Continuous model trainer (retrains all models every 24h)
         self.continuous_trainer = ContinuousTrainer(config, retrain_interval_hours=24)
@@ -137,7 +182,7 @@ class MultiPairBot:
         self.microstructure_analyzer = MicrostructureAnalyzer(self.client)
         
         # Telegram alerts
-        telegram_token = getattr(config, 'telegram_token', '')
+        telegram_token = getattr(config, 'telegram_bot_token', '')
         telegram_chat_id = getattr(config, 'telegram_chat_id', '')
         self.telegram = TelegramClient(telegram_token, telegram_chat_id)
         
@@ -146,6 +191,14 @@ class MultiPairBot:
         
         # Portfolio-level risk management
         self.portfolio_risk = PortfolioRiskManager(config)
+        
+        # Adaptive learning systems
+        self.pattern_analyzer = PatternAnalyzer()
+        self.adaptive_tuner = AdaptiveParameterTuner()
+        self.meta_learner = EnsembleOptimizer()
+        self.trade_logger = TradeLogger()  # For Learning Analytics
+        self.rl_online_learner = get_online_learner(config)  # For online RL updates
+        logger.info("🧠 Adaptive learning systems initialized")
         
         # Real-time Position Monitor (WebSocket-based fast exits)
         self.rtm = None
@@ -157,7 +210,9 @@ class MultiPairBot:
                 client=self.client,
                 order_manager=self.order_managers,  # Pass dict for per-symbol access
                 config=config,
-                logger=rtm_logger
+                logger=rtm_logger,
+                on_position_closed=self._on_rtm_position_closed,  # Callback for exit tracking
+                telegram=self.telegram  # Pass Telegram client for stop loss alerts
             )
             logger.info("✅ Real-time Position Monitor enabled")
         else:
@@ -165,16 +220,99 @@ class MultiPairBot:
         
         logger.info("Multi-Pair Bot initialized")
     
+    def is_symbol_tradeable(self, symbol: str) -> bool:
+        """
+        Check if a symbol is tradeable on this account (prevents -2010 errors)
+        
+        Args:
+            symbol: Trading pair to test
+            
+        Returns:
+            True if symbol can be traded, False otherwise
+        """
+        try:
+            # Test with minimum notional via test order
+            self.client.create_test_order(
+                symbol=symbol,
+                side='BUY',
+                type='MARKET',
+                quoteOrderQty=10
+            )
+            return True
+        except BinanceAPIException as e:
+            if e.code == -2010:
+                logger.warning(f"{symbol} not permitted for this account - skipping")
+                return False
+            # Other errors (network, etc) - assume tradeable
+            return True
+        except Exception:
+            # Unknown error - assume tradeable to avoid filtering too aggressively
+            return True
+    
     def discover_models(self) -> List[Dict]:
         """
-        Discover all trained ML models (advanced and legacy)
+        Discover all trained models (RL, advanced ML, and legacy ML)
         
         Returns:
             List of dicts with symbol, timeframe, accuracy
         """
         models = []
         
-        # Check for advanced models first (preferred)
+        # Check for RL models first (highest priority)
+        rl_dir = Path('models/rl_agents')
+        if rl_dir.exists():
+            for meta_file in rl_dir.glob('*.meta.json'):
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                    
+                    symbol = meta.get('symbol')
+                    timeframe = meta.get('timeframe')
+                    
+                    if symbol and timeframe:
+                        eval_stats = meta.get('evaluation', {})
+                        models.append({
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'accuracy': 1.0,  # RL gets priority
+                            'f1_score': 1.0,  # RL gets top priority
+                            'model_type': 'rl',
+                            'model_name': meta.get('algorithm', 'PPO'),
+                            'avg_return': eval_stats.get('avg_return_pct', 0),
+                            'sharpe': eval_stats.get('avg_sharpe_ratio', 0)
+                        })
+                        logger.debug(f"Found RL model: {symbol}_{timeframe}")
+                except Exception as e:
+                    logger.error(f"Error reading {meta_file}: {e}")
+        
+        # Check for mean reversion models
+        mean_reversion_dir = Path('models/mean_reversion')
+        if mean_reversion_dir.exists():
+            for meta_file in mean_reversion_dir.glob('*.meta.json'):
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                    
+                    # Parse filename: BTCUSDT_1h_mean_reversion.meta.json
+                    parts = meta_file.stem.replace('_mean_reversion.meta', '').split('_')
+                    if len(parts) >= 2:
+                        symbol = parts[0]
+                        timeframe = parts[1]
+                        
+                        models.append({
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'accuracy': meta.get('precision', meta.get('accuracy', 0)),  # Use precision for mean reversion
+                            'f1_score': meta.get('f1', 0),
+                            'model_type': 'mean_reversion',
+                            'model_name': meta.get('model_type', 'MeanReversion'),
+                            'n_features': 13  # Fixed feature count for mean reversion
+                        })
+                        logger.debug(f"Found mean reversion model: {symbol}_{timeframe}")
+                except Exception as e:
+                    logger.error(f"Error reading {meta_file}: {e}")
+        
+        # Check for advanced models
         advanced_dir = Path('models/advanced_ml')
         if advanced_dir.exists():
             for meta_file in advanced_dir.glob('*.meta.json'):
@@ -201,35 +339,34 @@ class MultiPairBot:
                 except Exception as e:
                     logger.error(f"Error reading {meta_file}: {e}")
         
-        # Fallback to legacy models if no advanced models
-        if not models:
-            legacy_dir = Path('models/ml_ema')
-            if legacy_dir.exists():
-                for meta_file in legacy_dir.glob('*.meta.json'):
-                    try:
-                        with open(meta_file, 'r') as f:
-                            meta = json.load(f)
+        # ALWAYS check legacy models (not just fallback)
+        legacy_dir = Path('models/ml_ema')
+        if legacy_dir.exists():
+            for meta_file in legacy_dir.glob('*.meta.json'):
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                    
+                    parts = meta_file.stem.replace('_ml_ema.meta', '').split('_')
+                    if len(parts) >= 2:
+                        symbol = parts[0]
+                        timeframe = parts[1]
                         
-                        parts = meta_file.stem.replace('_ml_ema.meta', '').split('_')
-                        if len(parts) >= 2:
-                            symbol = parts[0]
-                            timeframe = parts[1]
-                            
-                            models.append({
-                                'symbol': symbol,
-                                'timeframe': timeframe,
-                                'accuracy': meta.get('accuracy', 0),
-                                'f1_score': meta.get('f1', 0),
-                                'model_type': 'legacy',
-                                'model_name': meta.get('model', 'Unknown'),
-                                'n_features': 0
-                            })
-                            logger.debug(f"Found legacy model: {symbol}_{timeframe}")
-                    except Exception as e:
-                        logger.error(f"Error reading {meta_file}: {e}")
+                        models.append({
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'accuracy': meta.get('accuracy', 0),
+                            'f1_score': meta.get('f1', 0),
+                            'model_type': 'legacy',
+                            'model_name': meta.get('model', 'Unknown'),
+                            'n_features': 0
+                        })
+                        logger.debug(f"Found legacy model: {symbol}_{timeframe}")
+                except Exception as e:
+                    logger.error(f"Error reading {meta_file}: {e}")
         
-        # Sort by F1 score (best first)
-        models.sort(key=lambda x: x.get('f1_score', 0), reverse=True)
+        # Sort by accuracy (best first) - F1 can be misleading for imbalanced datasets
+        models.sort(key=lambda x: x.get('accuracy', 0), reverse=True)
         
         logger.info(f"Discovered {len(models)} trained models")
         advanced_count = sum(1 for m in models if m.get('model_type') == 'advanced')
@@ -310,15 +447,34 @@ class MultiPairBot:
         pair_config.timeframe = timeframe
         pair_config.max_position_size = self.base_position_size  # Will adjust dynamically
         
-        # Initialize components - use scalping if models not available
-        # Check if advanced model exists
+        # Initialize components - prioritize RL > Advanced ML > Legacy ML > Scalping
         from pathlib import Path
-        model_path = Path(f'models/advanced_ml/{symbol}_{timeframe}_advanced_ml.joblib')
         
-        if model_path.exists():
+        # Check for models in priority order: RL > Mean Reversion > Advanced ML > Legacy ML > Scalping
+        rl_model_path = Path(f'models/rl_agents/{symbol}_{timeframe}_rl_agent.zip')
+        mean_reversion_path = Path(f'models/mean_reversion/{symbol}_{timeframe}_mean_reversion.joblib')
+        advanced_model_path = Path(f'models/advanced_ml/{symbol}_{timeframe}_advanced_ml.joblib')
+        legacy_model_path = Path(f'models/ml_ema/{symbol}_{timeframe}_ml_ema.joblib')
+        
+        if rl_model_path.exists() and RL_AVAILABLE:
+            # Use RL strategy
+            self.strategies[symbol] = RLStrategy(pair_config)
+            logger.info(f"🤖 Using RL strategy for {symbol}")
+        elif mean_reversion_path.exists():
+            # Use Mean Reversion strategy
+            from strategies.mean_reversion_strategy import MeanReversionStrategy
+            self.strategies[symbol] = MeanReversionStrategy(pair_config)
+            logger.info(f"🔄 Using Mean Reversion strategy for {symbol}")
+        elif advanced_model_path.exists():
+            # Use Advanced ML strategy
             from strategies.advanced_ml_strategy import AdvancedMLStrategy
             self.strategies[symbol] = AdvancedMLStrategy(pair_config, model_monitor=self.model_monitor)
             logger.info(f"Using Advanced ML strategy for {symbol}")
+        elif legacy_model_path.exists():
+            # Use Legacy ML EMA strategy
+            from strategies.ml_ema_strategy import MLEMAStrategy
+            self.strategies[symbol] = MLEMAStrategy(pair_config)
+            logger.info(f"📊 Using ML EMA strategy for {symbol}")
         else:
             # Fallback to fast scalping strategy
             from strategies.scalping_strategy import ScalpingStrategy
@@ -488,6 +644,22 @@ class MultiPairBot:
                         })
                     return
                 
+                # COOLDOWN CHECK: Block re-entry within 5 mins to prevent fee churn
+                if symbol in self.recently_exited:
+                    time_since_exit = (datetime.now() - self.recently_exited[symbol]).total_seconds() / 60
+                    cooldown_mins = 5  # 5 minute cooldown
+                    if time_since_exit < cooldown_mins:
+                        reason = f"Cooldown active ({time_since_exit:.1f}m / {cooldown_mins}m)"
+                        logger.info(f"{symbol}: ⏱️ {reason} - preventing fee churn")
+                        if self.socketio:
+                            self.socketio.emit('signal_rejected', {
+                                'symbol': symbol,
+                                'action': 'BUY',
+                                'reason': reason,
+                                'timestamp': datetime.now().isoformat()
+                            })
+                        return
+                
                 if len(self.active_positions) >= self.max_concurrent_positions:
                     reason = f"Max positions reached ({len(self.active_positions)}/{self.max_concurrent_positions})"
                     logger.info(f"{symbol}: {reason}")
@@ -587,19 +759,44 @@ class MultiPairBot:
                 
                 logger.info(f"{symbol}: ML confidence {ml_confidence*100:.1f}% → ${position_size:.0f} position")
                 
-                # Check portfolio limit
+                # Check portfolio limit (use full account balance dynamically)
                 total_exposure = sum(pos['size'] for pos in self.active_positions.values())
-                if total_exposure + position_size > self.total_portfolio_limit:
-                    reason = f"Portfolio limit (${total_exposure:.0f}/${self.total_portfolio_limit})"
-                    logger.info(f"{symbol}: {reason}")
-                    if self.socketio:
-                        self.socketio.emit('signal_rejected', {
-                            'symbol': symbol,
-                            'action': 'BUY',
-                            'reason': reason,
-                            'timestamp': datetime.now().isoformat()
-                        })
-                    return
+                
+                # Calculate dynamic portfolio limit based on current account balance
+                try:
+                    # Get total account value (USDT + positions)
+                    account = self.client.get_account()
+                    usdt_free = float([b for b in account['balances'] if b['asset'] == 'USDT'][0]['free'])
+                    
+                    # Calculate value of open positions
+                    positions_value = 0
+                    for pos_symbol, pos in self.active_positions.items():
+                        try:
+                            ticker = self.client.get_symbol_ticker(symbol=pos_symbol)
+                            current_price = float(ticker['price'])
+                            qty = pos.get('quantity', pos['size'] / pos['entry_price'])
+                            positions_value += qty * current_price
+                        except:
+                            pass
+                    
+                    # Dynamic limit = full account value (allow using everything)
+                    dynamic_limit = usdt_free + positions_value
+                    
+                    if total_exposure + position_size > dynamic_limit:
+                        reason = f"Portfolio limit (${total_exposure:.0f}/${dynamic_limit:.0f} - full account)"
+                        logger.info(f"{symbol}: {reason}")
+                        if self.socketio:
+                            self.socketio.emit('signal_rejected', {
+                                'symbol': symbol,
+                                'action': 'BUY',
+                                'reason': reason,
+                                'timestamp': datetime.now().isoformat()
+                            })
+                        return
+                except Exception as e:
+                    logger.warning(f"Could not calculate dynamic portfolio limit: {e}")
+                    # Fallback: no limit check if balance fetch fails
+                    pass
             
             # Risk manager validation DISABLED for aggressive trading
             # risk_manager = self.risk_managers[symbol]
@@ -624,6 +821,106 @@ class MultiPairBot:
             # Use signal as-is (ML already validated it)
             validated_signal = signal
             
+            # === REGIME FILTER: Avoid mid-range chop (TEMPORARILY DISABLED) ===
+            # TODO: Re-enable after verifying RL agents work
+            # if signal['action'] == 'BUY' and klines and len(klines) >= 24:
+            #     from utils.atr_calculator import calculate_range_position, calculate_atr
+            #     
+            #     # Calculate where price sits in recent 24-period range
+            #     range_pos = calculate_range_position(klines, lookback=24)
+            #     
+            #     # Calculate ATR for volatility check
+            #     atr_pct = calculate_atr(klines, period=14)
+            #     
+            #     if range_pos is not None:
+            #         # Only enter at extremes: near lows (<0.2) or near highs (>0.8)
+            #         # Avoid mid-range chop (0.2-0.8) where price oscillates without follow-through
+            #         if 0.2 <= range_pos <= 0.8:
+            #             logger.info(
+            #                 f"{symbol}: ❌ MID-RANGE CHOP - range_pos={range_pos:.2f} "
+            #                 f"(need <0.2 or >0.8 for entry quality)"
+            #             )
+            #             if self.socketio:
+            #                 self.socketio.emit('signal_rejected', {
+            #                     'symbol': symbol,
+            #                     'action': 'BUY',
+            #                     'reason': f'Mid-range chop (pos={range_pos:.2f})',
+            #                     'timestamp': datetime.now().isoformat()
+            #                 })
+            #             return
+            #         else:
+            #             logger.info(
+            #                 f"{symbol}: ✅ REGIME OK - range_pos={range_pos:.2f} "
+            #                 f"{'(near low, bounce play)' if range_pos < 0.2 else '(near high, breakout play)'}"
+            #             )
+            
+            # === CONFIDENCE FILTER ===
+            # Only trade 50-95% confidence (high confidence is overfit)
+            # Exception: Mean reversion strategies can have >95% at extremes (RSI<30, RSI>70)
+            ml_confidence = signal.get('indicators', {}).get('ml_confidence', 0)
+            strategy_type = signal.get('indicators', {}).get('strategy', '')
+            
+            # Mean reversion gets higher confidence threshold (extremes are obvious)
+            max_conf_threshold = 1.0 if strategy_type == 'mean_reversion' else self.max_confidence
+            
+            logger.info(f"{symbol}: Confidence check - type='{strategy_type}', conf={ml_confidence*100:.1f}%, threshold={max_conf_threshold*100:.1f}%")
+            
+            if ml_confidence > max_conf_threshold:
+                logger.info(f"{symbol}: ❌ Confidence {ml_confidence*100:.0f}% TOO HIGH (overfit risk) - skipping")
+                if self.socketio:
+                    self.socketio.emit('signal_rejected', {
+                        'symbol': symbol,
+                        'action': 'BUY',
+                        'reason': f'Confidence {ml_confidence*100:.0f}% too high (overfit)',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                return
+            
+            # === 15-SECOND ENTRY CONFIRMATION ===
+            # Wait briefly and re-check price to avoid buying tops
+            if signal['action'] == 'BUY':
+                signal_price = signal['price']
+                logger.debug(f"{symbol}: Signal @ ${signal_price:.2f}, waiting 15s for confirmation...")
+                
+                await asyncio.sleep(15)  # 15 second wait
+                
+                # Get current price
+                try:
+                    ticker = self.client.get_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
+                    price_change_pct = ((current_price - signal_price) / signal_price) * 100
+                    
+                    # Entry logic:
+                    # - Dropped >1%: Skip (signal failed)
+                    # - Otherwise: Execute (dip, flat, or rising = all good)
+                    if price_change_pct < -1.0:
+                        logger.info(f"{symbol}: ❌ Entry SKIPPED - price dropped {price_change_pct:.2f}% in 15s (signal failed)")
+                        if self.socketio:
+                            self.socketio.emit('signal_rejected', {
+                                'symbol': symbol,
+                                'action': 'BUY',
+                                'reason': f'Price dropped {price_change_pct:.2f}% after signal',
+                                'timestamp': datetime.now().isoformat()
+                            })
+                        return
+                    
+                    # Update signal with current price for better entry
+                    validated_signal['price'] = current_price
+                    logger.info(f"{symbol}: ✓ Entry confirmed - price {price_change_pct:+.2f}% @ ${current_price:.2f}")
+                    
+                except Exception as e:
+                    logger.warning(f"{symbol}: Could not get current price for confirmation: {e}")
+                    # Continue with original price if check fails
+            
+            # CRITICAL: Prevent duplicate orders - check if position already open
+            if signal['action'] == 'BUY' and symbol in self.active_positions:
+                logger.warning(f"{symbol}: ⚠️ BUY signal IGNORED - position already open (preventing duplicate)")
+                return
+            
+            if signal['action'] == 'SELL' and symbol not in self.active_positions:
+                logger.warning(f"{symbol}: ⚠️ SELL signal IGNORED - no position to close")
+                return
+            
             # Execute order with position size
             order_manager = self.order_managers[symbol]
             if signal['action'] == 'BUY':
@@ -638,6 +935,16 @@ class MultiPairBot:
             if order:
                 # Track position
                 if signal['action'] == 'BUY':
+                    # Detect if this is RL or ML strategy
+                    is_rl = 'rl_action' in signal.get('indicators', {})
+                    
+                    # Extract entry fee and order type from order
+                    entry_fee = order.get('total_fee_usdt', 0.0)
+                    order_type = order.get('type', 'UNKNOWN')  # LIMIT or MARKET
+                    
+                    # Determine if maker or taker (LIMIT orders at bid/ask are maker)
+                    is_maker = order_type == 'LIMIT'
+                    
                     self.active_positions[symbol] = {
                         'entry_price': signal['price'],
                         'size': position_size,  # Use dynamic size
@@ -646,22 +953,44 @@ class MultiPairBot:
                         'ml_confidence': ml_confidence,
                         'highest_price': signal['price'],  # Track highest price for trailing stop
                         'trailing_stop_activated': False,
-                        'partial_exits': []  # Track partial exits taken
+                        'partial_exits': [],  # Track partial exits taken
+                        'strategy': 'RL' if is_rl else 'ML',  # Tag strategy type
+                        'entry_fee_usdt': entry_fee,  # Actual fee paid on entry
+                        'entry_order_type': order_type,  # LIMIT or MARKET
+                        'entry_is_maker': is_maker  # True if maker order
                     }
+                    
+                    # Save to persistent tracker
+                    self.position_tracker.save_position(
+                        symbol=symbol,
+                        entry_price=signal['price'],
+                        size=position_size,
+                        ml_confidence=ml_confidence,
+                        metadata={'timestamp': datetime.now().isoformat(), 'strategy': 'RL' if is_rl else 'ML'}
+                    )
+                    
+                    logger.info(f"✅ {symbol} BUY executed at ${signal['price']:.2f} (${position_size:.0f} @ {ml_confidence*100:.0f}% conf) | Fee: ${entry_fee:.4f}")
                     
                     # Track position in portfolio risk manager
                     self.portfolio_risk.add_position(symbol, position_size, signal['price'], ml_confidence)
-                    
-                    logger.info(f"✅ {symbol} BUY executed at ${signal['price']:.2f} (${position_size:.0f} @ {ml_confidence*100:.0f}% conf)")
                     
                     # Register position with Real-time Monitor
                     if self.rtm and order:
                         try:
                             # Get actual fill quantity from order
-                            fill_qty = float(order.get('executedQty', position_size / signal['price']))
-                            await self.rtm.register_position(symbol, signal['price'], fill_qty)
+                            fill_qty = float(order.get('executedQty', 0))
+                            if fill_qty == 0 and signal['price'] > 0:
+                                # Fallback: calculate from position size
+                                fill_qty = position_size / signal['price']
+                            
+                            if fill_qty > 0:
+                                # Pass entry fee to RTM so it can adjust break-even
+                                await self.rtm.register_position(symbol, signal['price'], fill_qty, entry_fee)
+                                logger.debug(f"RTM registered {symbol}: {fill_qty:.8f} @ ${signal['price']:.2f}")
+                            else:
+                                logger.warning(f"Cannot register {symbol} with RTM: fill_qty is zero")
                         except Exception as e:
-                            logger.error(f"Failed to register position with RTM: {e}")
+                            logger.error(f"Failed to register position with RTM: {e}", exc_info=True)
                     
                     # Send Telegram alert
                     self.telegram.send_trade_alert({
@@ -684,8 +1013,24 @@ class MultiPairBot:
                         })
                 elif signal['action'] == 'SELL' and symbol in self.active_positions:
                     position = self.active_positions.pop(symbol)
-                    pnl_pct = (signal['price'] - position['entry_price']) / position['entry_price'] * 100
-                    pnl_usd = (signal['price'] - position['entry_price']) * (position['size'] / position['entry_price'])
+                    
+                    # Remove from persistent tracker
+                    self.position_tracker.remove_position(symbol)
+                    
+                    # Extract exit fee from order
+                    exit_fee = order.get('total_fee_usdt', 0.0)
+                    entry_fee = position.get('entry_fee_usdt', 0.0)
+                    total_fees = entry_fee + exit_fee
+                    
+                    # Calculate P&L (gross and net)
+                    gross_pnl_usd = (signal['price'] - position['entry_price']) * (position['size'] / position['entry_price'])
+                    net_pnl_usd = gross_pnl_usd - total_fees
+                    gross_pnl_pct = (signal['price'] - position['entry_price']) / position['entry_price'] * 100
+                    net_pnl_pct = (net_pnl_usd / position['size']) * 100
+                    
+                    # Use net P&L for all reporting
+                    pnl_pct = net_pnl_pct
+                    pnl_usd = net_pnl_usd
                     
                     # Unregister from Real-time Monitor
                     if self.rtm:
@@ -729,6 +1074,26 @@ class MultiPairBot:
                         'reason': signal.get('reason', 'ML exit')
                     })
                     
+                    # Log to TradeLogger for Learning Analytics (with fees)
+                    trade_data = {
+                        'symbol': symbol,
+                        'entry_price': position['entry_price'],
+                        'exit_price': signal['price'],
+                        'position_size': position['size'],
+                        'profit_usd': pnl_usd,  # Net P&L after fees
+                        'profit_pct': pnl_pct,  # Net P&L% after fees
+                        'fees_paid': total_fees,  # Total fees (entry + exit)
+                        'ml_confidence': position.get('ml_confidence', 0),
+                        'entry_time': position['timestamp'],
+                        'exit_time': datetime.now().isoformat(),
+                        'exit_reason': signal.get('reason', 'RL/ML exit')
+                    }
+                    self.trade_logger.log_trade(trade_data)
+                    
+                    # Online RL learning from this trade
+                    if position.get('strategy') == 'RL':
+                        self.rl_online_learner.log_trade_experience(trade_data)
+                    
                     # Update adaptive Kelly with trade result
                     risk_manager = self.risk_managers[symbol]
                     risk_manager.update_recent_performance(won=(pnl_pct > 0))
@@ -747,9 +1112,119 @@ class MultiPairBot:
         
         except Exception as e:
             logger.error(f"Error executing signal for {symbol}: {e}")
+            
+            # Auto-blacklist symbols that return -2010 (not permitted)
+            if 'code=-2010' in str(e) or 'not permitted' in str(e).lower():
+                if symbol not in self.blacklisted_symbols:
+                    self.blacklisted_symbols.add(symbol)
+                    logger.warning(f"🚫 Auto-blacklisted {symbol} - not permitted on this account")
+                    
+                    # Remove strategy to prevent future signals
+                    if symbol in self.strategies:
+                        del self.strategies[symbol]
+                    if symbol in self.risk_managers:
+                        del self.risk_managers[symbol]
+                    if symbol in self.order_managers:
+                        del self.order_managers[symbol]
+    
+    async def _on_rtm_position_closed(self, exit_data: dict):
+        """Callback when RTM closes a position - log trade and track for re-entry window"""
+        symbol = exit_data['symbol']
+        exit_price = exit_data['exit_price']
+        reason = exit_data['reason']
+        exit_fee = exit_data.get('exit_fee_usdt', 0.0)
+        
+        # Get position data before removing
+        if symbol in self.active_positions:
+            position = self.active_positions.pop(symbol)
+            
+            # Get entry fee from position
+            entry_fee = position.get('entry_fee_usdt', 0.0)
+            total_fees = entry_fee + exit_fee
+            
+            # Calculate P&L (gross and net)
+            gross_pnl_usd = (exit_price - position['entry_price']) * (position['size'] / position['entry_price'])
+            net_pnl_usd = gross_pnl_usd - total_fees
+            gross_pnl_pct = ((exit_price - position['entry_price']) / position['entry_price']) * 100
+            net_pnl_pct = (net_pnl_usd / position['size']) * 100
+            
+            # Use net P&L for all reporting
+            pnl_pct = net_pnl_pct
+            pnl_usd = net_pnl_usd
+            
+            logger.info(f"📤 {symbol} RTM exit | Gross: {gross_pnl_pct:+.2f}% | Fees: ${total_fees:.4f} | Net: {net_pnl_pct:+.2f}% (${net_pnl_usd:+.2f})")
+            
+            # Record trade in performance tracker
+            self.performance_tracker.record_trade({
+                'symbol': symbol,
+                'action': 'SELL',
+                'entry_price': position['entry_price'],
+                'exit_price': exit_price,
+                'size': position['size'],
+                'pnl': pnl_usd,
+                'pnl_pct': pnl_pct,
+                'ml_confidence': position.get('ml_confidence', 0),
+                'entry_time': position['timestamp'],
+                'exit_time': datetime.now().isoformat(),
+                'reason': f'RTM: {reason}'
+            })
+            
+            # Log to TradeLogger for Learning Analytics (with fees)
+            trade_data = {
+                'symbol': symbol,
+                'entry_price': position['entry_price'],
+                'exit_price': exit_price,
+                'position_size': position['size'],
+                'profit_usd': pnl_usd,  # Net P&L after fees
+                'profit_pct': pnl_pct,  # Net P&L% after fees
+                'fees_paid': total_fees,  # Total fees (entry + exit)
+                'ml_confidence': position.get('ml_confidence', 0),
+                'entry_time': position['timestamp'],
+                'exit_time': datetime.now().isoformat(),
+                'exit_reason': f'RTM: {reason}'
+            }
+            self.trade_logger.log_trade(trade_data)
+            
+            # Online RL learning from this trade
+            if position.get('strategy') == 'RL':
+                self.rl_online_learner.log_trade_experience(trade_data)
+            
+            # Send Telegram close alert
+            self.telegram.send_position_close_alert({
+                'symbol': symbol,
+                'entry_price': position['entry_price'],
+                'exit_price': exit_price,
+                'pnl': pnl_usd,
+                'pnl_pct': pnl_pct,
+                'reason': reason
+            })
+            
+            # Remove from portfolio risk manager
+            self.portfolio_risk.remove_position(symbol)
+            
+            # Update model monitor with actual outcome
+            actual_outcome = 1 if pnl_pct > 0 else 0
+            self.model_monitor.update_actual_outcome(symbol, actual_outcome)
+            
+            # Update adaptive Kelly
+            if symbol in self.risk_managers:
+                risk_manager = self.risk_managers[symbol]
+                risk_manager.update_recent_performance(won=(pnl_pct > 0))
+            
+            logger.info(f"📤 {symbol} RTM exit logged: P&L {pnl_pct:+.2f}% (${pnl_usd:+.2f})")
+        
+        # Notify strategy about exit (triggers cooldown)
+        if symbol in self.strategies:
+            strategy = self.strategies[symbol]
+            if hasattr(strategy, 'last_exit_time'):
+                strategy.last_exit_time[symbol] = datetime.now()
+                logger.debug(f"⏱️ {symbol}: Strategy cooldown activated (2 min)")
+        
+        self.recently_exited[symbol] = datetime.now()
+        logger.info(f"🕒 {symbol} tracked as recently exited via RTM (2 min monitoring window)")
     
     async def check_trailing_stops(self):
-        """Check trailing stops for all open positions"""
+        """Check trailing stops for all open positions (LEGACY - RTM supersedes this)"""
         for symbol, position in list(self.active_positions.items()):
             try:
                 # Get current price
@@ -847,6 +1322,10 @@ class MultiPairBot:
                                 'reason': 'Trailing stop'
                             })
                             
+                            # Track recently exited for 2 min window (watch for bounce/re-entry)
+                            self.recently_exited[symbol] = datetime.now()
+                            logger.info(f"🕒 {symbol} tracked as recently exited (2 min monitoring window)")
+                            
                             logger.info(f"✅ {symbol} SELL executed via trailing stop (P&L: +{profit_pct:.2f}%)")
                             if self.socketio:
                                 self.socketio.emit('trade_executed', {
@@ -862,25 +1341,84 @@ class MultiPairBot:
                 logger.error(f"Error checking trailing stop for {symbol}: {e}")
     
     async def trading_cycle(self):
-        """Run one complete trading cycle across all pairs"""
+        """Run one complete trading cycle with intelligent scanning priority"""
         logger.info(f"⚡ TRADING_CYCLE CALLED - Strategies loaded: {len(self.strategies)} pairs")
         cycle_start = datetime.now()
         
         # Generate unique cycle ID
         self.current_cycle_id = str(uuid.uuid4())
         
-        # Get list of pairs
-        symbols = list(self.strategies.keys())
-        total_pairs = len(symbols)
+        # Get list of all available pairs
+        all_symbols = list(self.strategies.keys())
+        total_pairs = len(all_symbols)
         timeframe = self.config.timeframe
         
-        # Analyze pairs sequentially - LIMIT to 10 pairs per cycle to prevent blocking RTM
-        max_pairs_per_cycle = 10
-        symbols_to_analyze = symbols[:max_pairs_per_cycle]
-        pairs_this_cycle = len(symbols_to_analyze)
+        # Clean up recently_exited dict (remove pairs older than 2 mins - aggressive re-entry)
+        now = datetime.now()
+        expired = [sym for sym, exit_time in self.recently_exited.items() 
+                   if (now - exit_time).total_seconds() > 120]  # 2 mins = 120s (reduced from 15)
+        for sym in expired:
+            del self.recently_exited[sym]
+            logger.debug(f"🕒 {sym} no longer recently exited (2 min cooldown passed)")
         
-        # Log cycle start
-        logger.info(f"🔄 Trading cycle started [{self.current_cycle_id}] - Analyzing {pairs_this_cycle} of {total_pairs} pairs...")
+        # ===== INTELLIGENT SCANNING PRIORITY =====
+        # Priority 1: ALWAYS scan open positions (must check exits every cycle)
+        priority_symbols = list(self.active_positions.keys())
+        
+        # Priority 2: Recently exited positions (2 min cooldown - monitor but DON'T re-enter yet)
+        recently_exited_symbols = [sym for sym in self.recently_exited.keys() 
+                                   if sym not in priority_symbols]
+        # DON'T add to priority - let them cool down briefly to avoid immediate churn
+        # priority_symbols.extend(recently_exited_symbols)
+        
+        # Priority 3: Major pairs (BTC, ETH) - always include for high-value signals
+        major_pairs = ['BTCUSDT', 'ETHUSDT']
+        for major in major_pairs:
+            if major in all_symbols and major not in priority_symbols:
+                priority_symbols.append(major)
+        
+        # Scan pairs in batches of 15 for balanced coverage
+        max_pairs_per_cycle = 15  # Balanced: good coverage while staying responsive
+        
+        # Always include priority pairs first
+        priority_count = len(priority_symbols)
+        remaining_slots = max_pairs_per_cycle - priority_count
+        
+        if remaining_slots > 0:
+            # Get non-priority pairs sorted by ML model accuracy (best first)
+            other_pairs = [s for s in all_symbols if s not in priority_symbols]
+            
+            # Sort by accuracy (high to low) - pairs with best models get scanned first
+            other_pairs.sort(key=lambda s: self.model_accuracies.get(s, 0), reverse=True)
+            
+            # Rotate through all pairs (not just top N)
+            if self.all_pairs_rotation_idx >= len(other_pairs):
+                self.all_pairs_rotation_idx = 0
+            
+            # Take batch starting from rotation index
+            batch = other_pairs[self.all_pairs_rotation_idx:self.all_pairs_rotation_idx + remaining_slots]
+            
+            # If batch is smaller than remaining_slots, wrap around
+            if len(batch) < remaining_slots and len(other_pairs) > 0:
+                wrap_count = remaining_slots - len(batch)
+                batch.extend(other_pairs[:wrap_count])
+                self.all_pairs_rotation_idx = wrap_count
+            else:
+                self.all_pairs_rotation_idx += len(batch)
+            
+            symbols_to_analyze = priority_symbols + batch
+            scan_mode = f"ROTATING BATCH ({len(batch)} pairs, idx={self.all_pairs_rotation_idx}/{len(other_pairs)})"
+        else:
+            # Too many priority symbols - just scan those
+            symbols_to_analyze = priority_symbols[:max_pairs_per_cycle]
+            scan_mode = "PRIORITY ONLY (overflow)"
+        
+        pairs_this_cycle = len(symbols_to_analyze)
+        priority_count = len(priority_symbols)
+        
+        # Log cycle start with scan mode
+        logger.info(f"🔄 Cycle [{scan_mode}] - Analyzing {pairs_this_cycle} pairs "
+                   f"({priority_count} priority: {len(self.active_positions)} open + {len(recently_exited_symbols)} recent exits)")
         
         # Emit cycle_start event
         if self.socketio:
@@ -1071,20 +1609,42 @@ class MultiPairBot:
                 } for sym in ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']]
         
         # Filter models by minimum accuracy (only for ML models)
-        min_accuracy = 0.55
+        min_accuracy = 0.55  # 55% minimum - relaxed for mean reversion
         good_models = [m for m in models if m.get('model_type') == 'scalping' or m['accuracy'] >= min_accuracy]
         
         if not good_models:
-            logger.warning(f"No good models - using scalping on all discovered pairs")
-            good_models = models[:self.max_concurrent_positions]
+            logger.warning(f"No good models - using all discovered pairs")
+            good_models = models  # Use ALL models, not just first 6
+        
+        # Filter out symbols not tradeable on this account (prevent -2010 errors)
+        logger.info(f"Checking {len(good_models)} pairs for account permissions...")
+        tradeable_models = []
+        for model in good_models:
+            if self.is_symbol_tradeable(model['symbol']):
+                tradeable_models.append(model)
+        
+        skipped = len(good_models) - len(tradeable_models)
+        if skipped > 0:
+            logger.warning(f"⚠️  Skipped {skipped} pairs due to account restrictions")
+        
+        good_models = tradeable_models
+        
+        if not good_models:
+            logger.error("❌ No tradeable pairs remaining after filtering!")
+            return
         
         logger.info(f"Trading {len(good_models)} pairs with models:")
         for model in good_models:
             logger.info(f"  • {model['symbol']}: {model['accuracy']*100:.1f}% accuracy")
         
-        # Initialize trading for each pair
+        # Initialize trading for each pair and store model quality
+        # Skip blacklisted symbols
         for model in good_models:
+            if model['symbol'] in self.blacklisted_symbols:
+                logger.warning(f"⚠️  Skipping blacklisted symbol: {model['symbol']}")
+                continue
             self.initialize_pair(model['symbol'], model['timeframe'])
+            self.model_accuracies[model['symbol']] = model.get('accuracy', 0)
         
         # Initialize portfolio risk manager with starting balance
         try:
@@ -1127,6 +1687,14 @@ class MultiPairBot:
         except Exception as e:
             logger.error(f"Error checking existing orders: {e}")
         
+        # LOAD POSITIONS FROM PERSISTENT TRACKER FIRST
+        logger.info("📂 Loading positions from persistent tracker...")
+        tracked_positions = self.position_tracker.get_all_positions()
+        if tracked_positions:
+            logger.info(f"Found {len(tracked_positions)} tracked positions from previous session")
+            for symbol, tracked in tracked_positions.items():
+                logger.info(f"  {symbol}: entry=${tracked['entry_price']:.2f}, size=${tracked['size']:.2f}")
+        
         # CHECK FOR EXISTING HOLDINGS (actual positions)
         logger.info("Scanning account for existing holdings...")
         try:
@@ -1152,35 +1720,72 @@ class MultiPairBot:
                     current_price = float(ticker['price'])
                     position_value = total * current_price
                     
-                    # Only track positions worth > $1
-                    if position_value > 1.0:
+                    # Only track positions worth > $5 (ignore dust) and not blacklisted
+                    if position_value > 5.0 and symbol not in self.blacklisted_symbols:
                         holdings_found += 1
                         
-                        # Try to get average entry price from recent trades
+                        # Try to get entry price from persistent tracker first
                         entry_price = current_price  # Default to current price
                         entry_trades_count = 0
-                        try:
-                            trades = self.client.get_my_trades(symbol=symbol, limit=100)
-                            if trades:
-                                # Find ALL BUY trades to match our total quantity
-                                buy_trades = [t for t in trades if t['isBuyer']]
-                                if buy_trades:
-                                    # Calculate weighted average entry price from ALL buys
-                                    total_qty_trades = sum(float(t['qty']) for t in buy_trades)
-                                    weighted_sum = sum(float(t['price']) * float(t['qty']) for t in buy_trades)
+                        entry_source_type = 'current price'
+                        
+                        if symbol in tracked_positions:
+                            # Use tracked entry price (most accurate)
+                            entry_price = tracked_positions[symbol]['entry_price']
+                            entry_source_type = 'persistent tracker'
+                            logger.info(f"{symbol}: Using tracked entry price ${entry_price:.2f}")
+                        else:
+                            # Fallback to trade history if not in tracker
+                            try:
+                                # Fetch trades in batches until we match the full quantity
+                                max_iterations = 5  # Prevent infinite loops (500 trades max)
+                                all_buy_trades = []
+                                last_trade_id = None
+                                accumulated_qty = 0.0
+                                
+                                for _ in range(max_iterations):
+                                    params = {'symbol': symbol, 'limit': 100}
+                                    if last_trade_id:
+                                        params['fromId'] = last_trade_id
                                     
-                                    # Only use if trade qty matches our balance (within 1%)
-                                    if total_qty_trades > 0 and abs(total_qty_trades - total) / total < 0.01:
+                                    trades = self.client.get_my_trades(**params)
+                                    if not trades:
+                                        break
+                                    
+                                    # Filter BUY trades (moving backwards in time)
+                                    buy_trades_batch = [t for t in trades if t['isBuyer']]
+                                    all_buy_trades.extend(buy_trades_batch)
+                                    accumulated_qty += sum(float(t['qty']) for t in buy_trades_batch)
+                                    
+                                    # Stop if we've matched or exceeded our current quantity
+                                    if accumulated_qty >= total * 0.99:  # 99% match is good enough
+                                        break
+                                    
+                                    # Update last trade ID for next iteration
+                                    last_trade_id = trades[-1]['id'] - 1
+                                
+                                if all_buy_trades:
+                                    # Calculate weighted average entry price
+                                    total_qty_trades = sum(float(t['qty']) for t in all_buy_trades)
+                                    weighted_sum = sum(float(t['price']) * float(t['qty']) for t in all_buy_trades)
+                                    
+                                    if total_qty_trades > 0:
                                         entry_price = weighted_sum / total_qty_trades
-                                        entry_trades_count = len(buy_trades)
-                                        logger.debug(f"{symbol}: Calculated entry from {entry_trades_count} trades")
-                                    else:
-                                        logger.warning(
-                                            f"{symbol}: Trade qty mismatch - holding {total:.6f} but "
-                                            f"trades show {total_qty_trades:.6f}. Using current price as entry."
+                                        entry_trades_count = len(all_buy_trades)
+                                        match_pct = (total_qty_trades / total) * 100
+                                        logger.debug(
+                                            f"{symbol}: Calculated entry from {entry_trades_count} trades "
+                                            f"({match_pct:.1f}% qty match)"
                                         )
-                        except Exception as e:
-                            logger.debug(f"Could not fetch trade history for {symbol}: {e}")
+                                        
+                                        if match_pct < 95:
+                                            logger.warning(
+                                                f"{symbol}: Partial qty match - holding {total:.6f} but "
+                                                f"trades show {total_qty_trades:.6f} ({match_pct:.1f}%). "
+                                                f"Entry price may be inaccurate."
+                                        )
+                            except Exception as e:
+                                logger.debug(f"Could not fetch trade history for {symbol}: {e}")
                         
                         # Add to active positions
                         self.active_positions[symbol] = {
@@ -1200,7 +1805,13 @@ class MultiPairBot:
                         pnl = (current_price - entry_price) * total  # P&L in USD
                         pnl_pct = ((current_price - entry_price) / entry_price) * 100
                         
-                        entry_source = f"{entry_trades_count} trades" if entry_trades_count > 0 else "current price (no trades found)"
+                        if entry_source_type == 'persistent tracker':
+                            entry_source = 'tracker (accurate)'
+                        elif entry_trades_count > 0:
+                            entry_source = f"{entry_trades_count} trades"
+                        else:
+                            entry_source = "current price (no history)"
+                        
                         logger.info(
                             f"  📦 Found {symbol}: {total:.6f} {asset} @ ${current_price:.4f} "
                             f"(~${position_value:.2f}, entry: ${entry_price:.4f} from {entry_source}, "
@@ -1246,7 +1857,7 @@ class MultiPairBot:
         logger.info(f"Trading Mode: {'DRY RUN' if self.config.dry_run else 'LIVE'}")
         logger.info(f"Max Positions: {self.max_concurrent_positions}")
         logger.info(f"Position Size: ${self.base_position_size}-${self.max_position_size} (dynamic)")
-        logger.info(f"Portfolio Limit: ${self.total_portfolio_limit}")
+        logger.info(f"Portfolio Limit: Dynamic (full account balance)")
         logger.info(f"Continuous Training: Enabled (24h interval)")
         logger.info("=" * 60)
         
@@ -1264,6 +1875,14 @@ class MultiPairBot:
         # Track last model discovery time
         last_model_check = datetime.now()
         model_check_interval = 1800  # Check for new models every 30 minutes
+        
+        # Track last summary report time
+        last_summary_report = datetime.now()
+        summary_interval = 1800  # Send summary every 30 minutes (1800 seconds)
+        
+        # Track last daily report (send at midnight)
+        last_daily_report = datetime.now().date()
+        daily_report_sent_today = False
         
         # Main trading loop
         while self.running:
@@ -1289,12 +1908,69 @@ class MultiPairBot:
                     
                     last_model_check = datetime.now()
                 
-                logger.debug("🔄 Starting trading cycle...")
-                await self.trading_cycle()
-                logger.debug("✅ Trading cycle complete")
+                # Send periodic summary report (every 30 minutes)
+                if (datetime.now() - last_summary_report).total_seconds() > summary_interval:
+                    await self.send_performance_summary(interval='30min')
+                    last_summary_report = datetime.now()
                 
-                # Fast cycle for aggressive scalping (10 seconds)
-                await asyncio.sleep(10)
+                # Send daily summary at midnight
+                current_date = datetime.now().date()
+                current_hour = datetime.now().hour
+                if current_date > last_daily_report or (current_hour == 0 and not daily_report_sent_today):
+                    await self.send_performance_summary(interval='daily')
+                    last_daily_report = current_date
+                    daily_report_sent_today = True
+                elif current_hour != 0:
+                    daily_report_sent_today = False  # Reset flag for next day
+                
+                logger.info("🔄 Starting trading cycle...")
+                await self.trading_cycle()
+                logger.info("✅ Trading cycle complete")
+                
+                # Record balance snapshot every 5 minutes for accurate chart
+                try:
+                    if not hasattr(self, '_last_snapshot_time'):
+                        self._last_snapshot_time = datetime.now()
+                    
+                    time_since_snapshot = (datetime.now() - self._last_snapshot_time).total_seconds()
+                    if time_since_snapshot >= 300:  # 5 minutes = 300 seconds
+                        # Get actual USDT balance
+                        account = self.client.get_account()
+                        usdt_balance = float([b for b in account['balances'] if b['asset'] == 'USDT'][0]['free'])
+                        
+                        # Calculate position value
+                        position_value = 0
+                        for symbol, position in self.active_positions.items():
+                            try:
+                                ticker = self.client.get_symbol_ticker(symbol=symbol)
+                                current_price = float(ticker['price'])
+                                qty = position.get('quantity', position['size'] / position['entry_price'])
+                                position_value += qty * current_price
+                            except:
+                                pass
+                        
+                        total_value = usdt_balance + position_value
+                        
+                        # Record snapshot
+                        self.performance_tracker.record_balance_snapshot(
+                            usdt_balance=usdt_balance,
+                            total_value=total_value,
+                            open_positions=len(self.active_positions),
+                            position_value=position_value
+                        )
+                        
+                        self._last_snapshot_time = datetime.now()
+                        logger.debug(f"📊 Balance snapshot: ${total_value:.2f} (${usdt_balance:.2f} USDT + ${position_value:.2f} positions)")
+                except Exception as e:
+                    logger.debug(f"Could not record balance snapshot: {e}")
+                
+                # Delay between cycles to prevent duplicate signals
+                # For 5m timeframe: scan every 3 seconds for fast signal detection
+                # RTM handles position monitoring in parallel at high frequency
+                cycle_delay = 3  # 3 seconds between scans
+                logger.info(f"💤 Sleeping {cycle_delay}s before next cycle...")
+                await asyncio.sleep(cycle_delay)
+                logger.info("⏰ Sleep complete, starting next cycle")
             
             except KeyboardInterrupt:
                 logger.info("Received stop signal")
@@ -1359,6 +2035,106 @@ class MultiPairBot:
                 logger.error(f"Error closing {symbol}: {e}")
         
         logger.info("All positions closed.")
+    
+    async def send_performance_summary(self, interval='30min'):
+        """Send periodic performance summary to Telegram
+        
+        Args:
+            interval: '30min' or 'daily'
+        """
+        try:
+            # Get account balance
+            account = self.client.get_account()
+            usdt_balance = float([b for b in account['balances'] if b['asset'] == 'USDT'][0]['free'])
+            
+            # Calculate total portfolio value (USDT + positions)
+            total_position_value = 0
+            for symbol, position in self.active_positions.items():
+                try:
+                    ticker = self.client.get_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
+                    position_value = (position['size'] / position['entry_price']) * current_price
+                    total_position_value += position_value
+                except Exception as e:
+                    logger.warning(f"Could not get price for {symbol}: {e}")
+            
+            total_portfolio = usdt_balance + total_position_value
+            
+            # Get recent performance stats
+            hours = 24 if interval == 'daily' else 24  # Both use 24h for consistency
+            stats = self.performance_tracker.get_stats(hours=hours)
+            
+            # Calculate unrealized P&L from open positions
+            unrealized_pnl = 0
+            position_details = []
+            for symbol, position in self.active_positions.items():
+                try:
+                    ticker = self.client.get_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
+                    entry_price = position['entry_price']
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    pnl_usd = (current_price - entry_price) * (position['size'] / entry_price)
+                    unrealized_pnl += pnl_usd
+                    
+                    emoji = "🟢" if pnl_pct > 0 else "🔴"
+                    position_details.append(
+                        f"{emoji} {symbol}: {pnl_pct:+.2f}% (${pnl_usd:+.2f})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not calculate P&L for {symbol}: {e}")
+            
+            # Build summary message
+            total_trades = stats.get('total_trades', 0)
+            winning_trades = stats.get('winning_trades', 0)
+            losing_trades = total_trades - winning_trades
+            win_rate = stats.get('win_rate', 0) * 100
+            total_pnl = stats.get('total_pnl', 0)
+            
+            summary = {
+                'total_trades': total_trades,
+                'winning_trades': winning_trades,
+                'win_rate': win_rate / 100,
+                'total_pnl': total_pnl,
+                'open_positions': len(self.active_positions)
+            }
+            
+            # Enhanced message with portfolio value
+            if interval == 'daily':
+                title = "📊 <b>Daily Summary</b>"
+                emoji = "🌙"
+            else:
+                title = "📊 <b>30-Minute Update</b>"
+                emoji = "⏰"
+            
+            message = f"{title}\n\n"
+            message += f"💰 <b>Portfolio</b>\n"
+            message += f"  • Total Value: ${total_portfolio:.2f}\n"
+            message += f"  • Free USDT: ${usdt_balance:.2f}\n"
+            message += f"  • In Positions: ${total_position_value:.2f}\n\n"
+            
+            message += f"📈 <b>Trading (Last 24h)</b>\n"
+            message += f"  • Trades: {total_trades} ({winning_trades}W / {losing_trades}L)\n"
+            message += f"  • Win Rate: {win_rate:.1f}%\n"
+            message += f"  • Realized P&L: ${total_pnl:+.2f}\n"
+            message += f"  • Unrealized P&L: ${unrealized_pnl:+.2f}\n\n"
+            
+            message += f"📊 <b>Open Positions: {len(self.active_positions)}</b>\n"
+            if position_details:
+                for detail in position_details[:8]:  # Limit to 8 positions to avoid long message
+                    message += f"  {detail}\n"
+                if len(position_details) > 8:
+                    message += f"  ... and {len(position_details) - 8} more\n"
+            else:
+                message += "  None\n"
+            
+            message += f"\n{emoji} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # Send via Telegram
+            self.telegram.send_message(message)
+            logger.info("📤 Sent performance summary to Telegram")
+            
+        except Exception as e:
+            logger.error(f"Error sending performance summary: {e}", exc_info=True)
     
     async def async_stop(self):
         """Async stop for proper RTM cleanup"""

@@ -9,6 +9,7 @@ from binance.exceptions import BinanceAPIException
 from strategies.simple_strategy import SimpleStrategy
 from strategies.ml_ema_strategy import MLEMAStrategy
 from strategies.scalping_strategy import ScalpingStrategy
+from strategies.mean_reversion_strategy import MeanReversionStrategy
 from utils.risk_manager import RiskManager
 from utils.order_manager import OrderManager
 from utils.telegram_notifier import TelegramNotifier
@@ -41,6 +42,9 @@ class TradingBot:
         elif config.strategy == 'scalping':
             self.logger.info("Initializing FAST Scalping Strategy (RSI + EMA)")
             self.strategy = ScalpingStrategy(config)
+        elif config.strategy == 'mean_reversion':
+            self.logger.info("Initializing Mean Reversion ML Strategy")
+            self.strategy = MeanReversionStrategy(config)
         else:
             self.logger.info("Initializing Simple SMA Strategy")
             self.strategy = SimpleStrategy(config)
