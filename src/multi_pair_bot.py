@@ -200,6 +200,21 @@ class MultiPairBot:
         self.rl_online_learner = get_online_learner(config)  # For online RL updates
         logger.info("🧠 Adaptive learning systems initialized")
         
+        # Momentum Scanner (independent of ML models)
+        self.momentum_scanner = None
+        self.momentum_risk_manager = None
+        if config.momentum_scanner_enabled:
+            from utils.order_book_analyzer import OrderBookAnalyzer
+            from utils.momentum_scanner import MomentumScanner
+            from utils.momentum_risk_manager import MomentumRiskManager
+            
+            order_book_analyzer = OrderBookAnalyzer(self.client)
+            self.momentum_scanner = MomentumScanner(self.client, config, order_book_analyzer)
+            self.momentum_risk_manager = MomentumRiskManager(config)
+            logger.info("🚀 Momentum Scanner initialized (enabled)")
+        else:
+            logger.info("⚠️  Momentum Scanner disabled")
+        
         # Real-time Position Monitor (WebSocket-based fast exits)
         self.rtm = None
         if config.realtime_monitoring_enabled:
@@ -1524,6 +1539,23 @@ class MultiPairBot:
                         'progress': (idx + 1) / pairs_this_cycle
                     })
         
+        # === RUN MOMENTUM SCANNER (in parallel with ML) ===
+        momentum_signals = []
+        if self.momentum_scanner:
+            try:
+                logger.debug("🔍 Running momentum scanner...")
+                momentum_signals = await self.momentum_scanner.scan()
+                
+                if momentum_signals:
+                    logger.info(f"🚀 Momentum scanner found {len(momentum_signals)} signals")
+                    
+                    # Process momentum signals
+                    for signal in momentum_signals:
+                        await self.handle_momentum_signal(signal)
+            
+            except Exception as e:
+                logger.error(f"Momentum scanner failed: {e}", exc_info=True)
+        
         # Calculate cycle duration
         cycle_duration_ms = int((datetime.now() - cycle_start).total_seconds() * 1000)
         cycle_time_s = cycle_duration_ms / 1000
@@ -1531,9 +1563,12 @@ class MultiPairBot:
         # Log summary
         signals_found = signal_counts.get('BUY', 0) + signal_counts.get('SELL', 0)
         if signals_found > 0:
-            logger.info(f"✅ Cycle complete: {signals_found} signals in {cycle_time_s:.2f}s")
+            logger.info(f"✅ Cycle complete: {signals_found} ML signals in {cycle_time_s:.2f}s")
         else:
-            logger.debug(f"✅ Cycle complete: No signals in {cycle_time_s:.2f}s")
+            logger.debug(f"✅ Cycle complete: No ML signals in {cycle_time_s:.2f}s")
+        
+        if momentum_signals:
+            logger.info(f"✅ Momentum: {len(momentum_signals)} signals detected")
         
         # Log portfolio status
         if self.active_positions:
@@ -1553,6 +1588,182 @@ class MultiPairBot:
                 'positions': len(self.active_positions),
                 'dry_run': self.config.dry_run
             })
+    
+    async def handle_momentum_signal(self, signal: Dict):
+        """
+        Handle momentum scanner signal: Telegram alert or auto-trade
+        
+        Args:
+            signal: Momentum signal dict from scanner
+        """
+        try:
+            symbol = signal['symbol']
+            filters_passed = signal['filters_passed']
+            momentum_score = signal['momentum_score']
+            
+            # Check if we can open a momentum position
+            can_open, reason = self.momentum_risk_manager.can_open_momentum_position(self.active_positions)
+            
+            if not can_open:
+                logger.info(f"{symbol}: Momentum signal blocked - {reason}")
+                return
+            
+            # Determine action based on filters passed
+            if filters_passed >= self.config.momentum_trade_threshold and self.config.momentum_auto_trade:
+                # AUTO-TRADE: 10/10 filters
+                logger.info(f"🚀 {symbol}: MOMENTUM AUTO-TRADE (filters {filters_passed}/10, score {momentum_score:.1f}/10)")
+                await self.execute_momentum_trade(signal)
+            
+            elif filters_passed >= self.config.momentum_alert_threshold:
+                # ALERT: 7-9/10 filters
+                logger.info(f"🚨 {symbol}: MOMENTUM ALERT (filters {filters_passed}/10, score {momentum_score:.1f}/10)")
+                self.send_momentum_alert(signal)
+            
+            # Emit to dashboard
+            if self.socketio:
+                self.socketio.emit('momentum_signal', {
+                    'symbol': symbol,
+                    'filters_passed': filters_passed,
+                    'momentum_score': momentum_score,
+                    'price': signal['current_price'],
+                    'entry': signal['recommended_entry'],
+                    'stop_loss': signal['stop_loss'],
+                    'take_profit': signal['take_profit'],
+                    'risk_level': signal['risk_level'],
+                    'auto_trade': filters_passed >= self.config.momentum_trade_threshold and self.config.momentum_auto_trade,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        except Exception as e:
+            logger.error(f"Error handling momentum signal: {e}", exc_info=True)
+    
+    def send_momentum_alert(self, signal: Dict):
+        """Send Telegram alert for momentum signal"""
+        try:
+            symbol = signal['symbol']
+            score = signal['momentum_score']
+            price = signal['current_price']
+            entry = signal['recommended_entry']
+            stop_loss = signal['stop_loss']
+            take_profit = signal['take_profit']
+            filters_passed = signal['filters_passed']
+            risk_level = signal['risk_level']
+            
+            # Calculate price changes from indicators
+            indicators = signal.get('indicators', {})
+            price_change_1h = indicators.get('price_change_1h', 0)
+            vol_ratio = indicators.get('vol_ratio_5m', 0)
+            
+            # Format message
+            message = (
+                f"🚀 <b>MOMENTUM ALERT: {symbol}</b>\n\n"
+                f"📊 Momentum Score: {score:.1f}/10\n"
+                f"💰 Price: ${price:.4f} ({price_change_1h:+.1f}% 1h)\n"
+                f"📈 Volume Surge: {vol_ratio:.1f}x average\n"
+                f"🎯 Entry: ${entry:.4f} (on pullback)\n"
+                f"🛡️ Stop: ${stop_loss:.4f} (-{((entry-stop_loss)/entry*100):.1f}%)\n"
+                f"🎁 Target: ${take_profit:.4f} (+{((take_profit-entry)/entry*100):.1f}%)\n\n"
+                f"✅ Filters Passed: {filters_passed}/10\n"
+                f"⚠️ Risk: {risk_level}\n\n"
+                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            
+            self.telegram.send_message(message)
+            logger.info(f"📤 Telegram alert sent for {symbol}")
+        
+        except Exception as e:
+            logger.error(f"Failed to send Telegram alert: {e}")
+    
+    async def execute_momentum_trade(self, signal: Dict):
+        """
+        Execute momentum trade (10/10 filters only)
+        
+        Args:
+            signal: Momentum signal dict
+        """
+        try:
+            symbol = signal['symbol']
+            
+            # Check if position already exists
+            if symbol in self.active_positions:
+                logger.warning(f"{symbol}: Momentum trade blocked - position already open")
+                return
+            
+            # Get account balance
+            account = self.client.get_account()
+            usdt_free = float([b for b in account['balances'] if b['asset'] == 'USDT'][0]['free'])
+            
+            # Calculate position size
+            entry_price = signal['recommended_entry']
+            position_usdt = self.momentum_risk_manager.size_position(entry_price, usdt_free)
+            
+            if position_usdt == 0:
+                logger.warning(f"{symbol}: Position size too small, skipping")
+                return
+            
+            # Get or create order manager for this symbol
+            if symbol not in self.order_managers:
+                from utils.order_manager import OrderManager
+                self.order_managers[symbol] = OrderManager(
+                    client=self.client,
+                    config=self.config,
+                    symbol=symbol
+                )
+            
+            order_manager = self.order_managers[symbol]
+            
+            # Create order signal format
+            order_signal = {
+                'action': 'BUY',
+                'price': entry_price,
+                'reason': f"Momentum breakout (score {signal['momentum_score']:.1f}/10)",
+                'indicators': signal['indicators']
+            }
+            
+            # Execute order
+            if self.config.dry_run:
+                logger.info(f"[DRY RUN] Would execute momentum BUY for {symbol}: ${position_usdt:.2f} @ ${entry_price:.4f}")
+            else:
+                order = await order_manager.execute_order(
+                    signal=order_signal,
+                    position_usdt=position_usdt
+                )
+                
+                if order:
+                    # Track position with MOMENTUM tag
+                    stop_loss, take_profit = self.momentum_risk_manager.stops_targets(entry_price)
+                    
+                    self.active_positions[symbol] = {
+                        'entry_price': entry_price,
+                        'size': position_usdt,
+                        'quantity': position_usdt / entry_price,
+                        'entry_time': datetime.now(),
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'strategy_type': 'MOMENTUM',  # Tag as momentum trade
+                        'momentum_score': signal['momentum_score'],
+                        'filters_passed': signal['filters_passed'],
+                        'peak_price': entry_price  # For trailing stops
+                    }
+                    
+                    logger.info(
+                        f"✅ {symbol}: Momentum position opened - ${position_usdt:.2f} @ ${entry_price:.4f} "
+                        f"(SL: ${stop_loss:.4f}, TP: ${take_profit:.4f})"
+                    )
+                    
+                    # Send Telegram notification
+                    self.telegram.send_message(
+                        f"✅ <b>MOMENTUM TRADE EXECUTED</b>\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Entry: ${entry_price:.4f}\n"
+                        f"Size: ${position_usdt:.2f}\n"
+                        f"Stop Loss: ${stop_loss:.4f}\n"
+                        f"Take Profit: ${take_profit:.4f}\n"
+                        f"Score: {signal['momentum_score']:.1f}/10"
+                    )
+        
+        except Exception as e:
+            logger.error(f"Failed to execute momentum trade: {e}", exc_info=True)
     
     async def start(self):
         """Start the multi-pair trading bot"""
