@@ -8,6 +8,7 @@ numpy==1.26.2
 # Technical analysis
 ta==0.11.0
 # TA-Lib==0.4.28  # Requires system installation of ta-lib library
+rapidfuzz==3.10.0  # Fast fuzzy string matching for token filtering
 
 # Environment variables
 python-dotenv==1.0.0
