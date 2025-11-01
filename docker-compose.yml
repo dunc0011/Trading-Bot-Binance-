@@ -22,6 +22,7 @@ services:
       - ./src:/app/src
       - ./config:/app/config
       - ./web:/app/web
+      - ./scripts:/app/scripts
       - ./start.sh:/app/start.sh
     environment:
       - PYTHONUNBUFFERED=1

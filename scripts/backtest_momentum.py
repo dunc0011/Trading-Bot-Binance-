@@ -46,8 +46,8 @@ class BacktestMomentumScanner:
         self.symbol = symbol
         self.start = start
         self.end = end
-        self.client = Client(config.binance_api_key, config.binance_api_secret, testnet=False)
-        self.scanner = MomentumScanner(config, self.client)
+        self.client = Client(config.api_key, config.api_secret, testnet=False)
+        self.scanner = MomentumScanner(self.client, config)
         self.results = []
         
     async def fetch_historical_klines(self, interval: str) -> List[List]:
@@ -111,10 +111,10 @@ class BacktestMomentumScanner:
         return {
             'timestamp': timestamp,
             'price': current_price,
-            'filters_passed': len(filter_results['filters_passed']),
+            'filters_passed': filter_results['filters_passed'],
             'filters_failed': len(filter_results['filters_failed']),
             'momentum_score': indicators.get('momentum_score', 0),
-            'volume_surge': indicators.get('volume_surge_5m', 0),
+            'volume_surge': indicators.get('vol_ratio_5m', 0),
             'rsi_5m': indicators.get('rsi_5m', 0),
             'adx_15m': indicators.get('adx_15m', 0),
             'filter_details': filter_results
